@@ -73,3 +73,5 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+hs_err_pid*.log
+openway_backand/
