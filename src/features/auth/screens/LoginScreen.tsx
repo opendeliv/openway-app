@@ -136,22 +136,22 @@ export default function LoginScreen({ navigation }: Props) {
       setLoading(false);
     }
   };
-
-  const onVerify = async () => {
-    if (!isOtpValid || loading) return;
-    setLoading(true);
-    setError('');
-    try {
-      const { token } = await authApi.verifyOtp(phone, otp);
-      await saveToken(token); // saved in MMKV, so the user stays logged in after closing the app
-      navigation.replace('MainTabs');
-    } catch (e: any) {
-      setError(e.message);
-      setOtp('');
-      otpInputRef.current?.focus();
-      setLoading(false);
-    }
-  };
+const onVerify = async () => {
+  if (!isOtpValid || loading) return;
+  setLoading(true);
+  setError('');
+  try {
+    const { token, user } = await authApi.verifyOtp(phone, otp);
+    await saveToken(token);
+    // Admin ko alag tabs, baaki sab ko normal app
+    navigation.replace(user?.role === 'ADMIN' ? 'AdminTabs' : 'MainTabs');
+  } catch (e: any) {
+    setError(e.message);
+    setOtp('');
+    otpInputRef.current?.focus();
+    setLoading(false);
+  }
+};
 
   const onResend = async () => {
     if (seconds > 0 || loading) return;

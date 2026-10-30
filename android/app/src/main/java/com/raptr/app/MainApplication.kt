@@ -1,4 +1,4 @@
-package com.openway
+package com.raptr.app
 
 import android.app.Application
 import com.facebook.react.PackageList

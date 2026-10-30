@@ -12,6 +12,7 @@ export { BASE_URL };
 const storage = createMMKV();
 
 const TOKEN_KEY = 'auth_token';
+const ROLE_KEY = 'auth_role';
 
 let token: string | null = storage.getString(TOKEN_KEY) ?? null;
 
@@ -26,10 +27,20 @@ export const getToken = () => {
   return token;
 };
 
-/* Clear JWT token */
+/* Save / get user role (USER ya ADMIN), app dobara khulne par seedha sahi tabs ke liye */
+export const saveRole = (role?: string) => {
+  storage.set(ROLE_KEY, role ?? 'USER');
+};
+
+export const getRole = () => {
+  return storage.getString(ROLE_KEY) ?? 'USER';
+};
+
+/* Clear JWT token (role bhi hatao) */
 export const clearToken = async () => {
   token = null;
   storage.remove(TOKEN_KEY);
+  storage.remove(ROLE_KEY);
 };
 
 /* =========================================================
@@ -104,9 +115,11 @@ api.interceptors.response.use(
 /* ---------- Basic User ---------- */
 
 export type User = {
+  [x: string]: string;
   id: string;
   phone: string;
   name: string | null;
+  role: string; // USER ya ADMIN
   createdAt: string;
 };
 
@@ -166,4 +179,43 @@ export const profileApi = {
     profilePhoto?: string;
   }) =>
     api.patch<ProfileUser>('/users/me', data).then((response) => response.data),
+};
+
+/* =========================================================
+   ADMIN API (sirf ADMIN role wale ke liye)
+   ========================================================= */
+
+export const adminApi = {
+  /* Admin ki apni detail */
+  me: () => api.get<any>('/auth/me').then((response) => response.data),
+
+  /* pending / approved / rejected / total count */
+  stats: () =>
+    api
+      .get<{ pending: number; approved: number; rejected: number; total: number }>(
+        '/auth/admin/captains/stats',
+      )
+      .then((response) => response.data),
+
+  /* Captains ki list (status: PENDING | APPROVED | REJECTED, khali = sab) */
+  captains: (status?: string) =>
+    api
+      .get<any>('/auth/admin/captains', { params: { status, limit: 50 } })
+      .then((response) => response.data),
+  /* Ek captain ki poori detail + uske documents */
+  captain: (id: string) =>
+    api
+      .get<any>(`/auth/admin/captains/${id}`)
+      .then((response) => response.data),
+  /* Approve */
+  approve: (id: string) =>
+    api
+      .patch<any>(`/auth/admin/captains/${id}/approve`)
+      .then((response) => response.data),
+
+  /* Reject (wajah zaroori) */
+  reject: (id: string, reason: string) =>
+    api
+      .patch<any>(`/auth/admin/captains/${id}/reject`, { reason })
+      .then((response) => response.data),
 };

@@ -115,6 +115,8 @@ export default function CaptainRideCard({
   onCancel,
 }: Props) {
   const ride = captainRide.ride;
+    // Trip start hone ke baad cancel nahi, aur complete sirf map screen se (drop ke paas)
+  const tripStarted = captainRide.status === 'STARTED';
   const category = ride?.category as RideCategory | undefined;
   const isParcelLike = category === 'PARCEL' || category === 'GOODS';
 
@@ -216,7 +218,7 @@ export default function CaptainRideCard({
         <Text style={styles.mapBtnText}>View ride on map</Text>
       </TouchableOpacity>
 
-      {!!nextActionLabel && (
+          {!!nextActionLabel && !tripStarted && (
         <TouchableOpacity
           style={[styles.primaryBtn, updating && styles.btnDisabled]}
           disabled={updating}
@@ -230,9 +232,17 @@ export default function CaptainRideCard({
         </TouchableOpacity>
       )}
 
-      <TouchableOpacity style={styles.cancelBtn} disabled={updating} onPress={onCancel}>
-        <Text style={styles.cancelBtnText}>Cancel Ride</Text>
-      </TouchableOpacity>
+      {tripStarted && (
+        <Text style={styles.tripHint}>
+          Trip chal rahi hai. Drop ke 400 m ke andar map screen par "Complete ride" aayega.
+        </Text>
+      )}
+
+           {!tripStarted && (
+        <TouchableOpacity style={styles.cancelBtn} disabled={updating} onPress={onCancel}>
+          <Text style={styles.cancelBtnText}>Cancel Ride</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -281,6 +291,13 @@ const styles = StyleSheet.create({
     borderTopColor: BORDER,
     paddingTop: 12,
     marginBottom: 14,
+  },
+    tripHint: {
+    fontSize: 12.5,
+    color: GREY,
+    textAlign: 'center',
+    marginTop: 4,
+    lineHeight: 18,
   },
   stat: { flex: 1, alignItems: 'center' },
   statValue: { fontSize: 15, fontWeight: '800', color: BLACK },

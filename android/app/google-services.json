@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "895587255929",
+    "project_id": "raptr-app",
+    "storage_bucket": "raptr-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:895587255929:android:b5c844da4a87a4e1abf6a8",
+        "android_client_info": {
+          "package_name": "com.raptr.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA6ZzPihhj9AnJcfVUxH6WF5lLpDi-CLMc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

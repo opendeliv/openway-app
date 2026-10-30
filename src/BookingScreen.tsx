@@ -2,7 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Dimensions,
   Image,
+  PanResponder,
   Text,
   TextInput,
   TouchableOpacity,
@@ -11,13 +14,14 @@ import {
   ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 
 import { ridesApi } from './services/ridesApi';
 import { mapsApi, decodePolyline, Place, RouteInfo } from './services/mapsApi';
 import LocationPicker from './LocationPicker';
 import { VEHICLE_ICONS } from './constants/vehicleIcons';
+import { useHideTabBarOnScroll } from './components/AppTabBar';
 
 const BLUE = '#1F6FE5';
 const BLUE_DARK = '#1553B3';
@@ -28,6 +32,14 @@ const GREY = '#64748B';
 const BORDER = '#E2E8F0';
 const GREEN = '#16A34A';
 const RED = '#DC2626';
+
+// ---------- Map + bottom sheet (Rapido style) ----------
+const SCREEN_H = Dimensions.get('window').height;
+const SNAP_TOP = SCREEN_H * 0.34; // default: map upar (route dikhta hai), neeche sheet
+const SNAP_HALF = SCREEN_H * 0.52; // neeche kheencho: map aur bada
+const MAP_H = SNAP_HALF + 40; // map ki fixed height (sheet ke peeche tak)
+// route ko default visible patti ke andar fit karne ke liye upar-neeche ka padding
+const FIT_PAD_V = (MAP_H - SNAP_TOP) / 2;
 
 type Category = 'CAB' | 'BIKE' | 'PARCEL' | 'GOODS';
 
@@ -344,6 +356,7 @@ export default function BookingScreen({
   initialPickup,
   initialDrop,
 }: Props) {
+   const hideTabBar = useHideTabBarOnScroll();
   const isCab = service === 'cab';
   const needsReceiver = NEEDS_RECEIVER.includes(service);
   const category = SERVICE_CATEGORY[service];
@@ -377,6 +390,82 @@ export default function BookingScreen({
   const [routeLoading, setRouteLoading] = useState(false);
   const mapRef = useRef<MapView>(null);
   const [mapStatus, setMapStatus] = useState<'loading' | 'ready' | 'loaded' | 'failed'>('loading');
+
+  // ---------- bottom sheet state ----------
+  const [mapExpanded, setMapExpanded] = useState(false); // true = map bada
+  const sheetTop = useRef(new Animated.Value(SNAP_TOP)).current;
+  const sheetTopVal = useRef(SNAP_TOP); // sheetTop ki current number value
+  const dragStart = useRef(SNAP_TOP);
+  const scrollY = useRef(0); // sheet ke andar ki list kitni scroll hui
+
+  useEffect(() => {
+    const id = sheetTop.addListener(({ value }) => {
+      sheetTopVal.current = value;
+    });
+    return () => sheetTop.removeListener(id);
+  }, [sheetTop]);
+
+  const snapTo = (half: boolean) => {
+    setMapExpanded(half);
+    Animated.spring(sheetTop, {
+      toValue: half ? SNAP_HALF : SNAP_TOP,
+      useNativeDriver: false,
+      speed: 14,
+      bounciness: 4,
+    }).start();
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponderCapture: (_, g) => {
+        // sirf vertical drag
+        if (Math.abs(g.dy) < 8 || Math.abs(g.dy) < Math.abs(g.dx)) return false;
+
+        const down = g.dy > 0;
+        const atTop = sheetTopVal.current <= SNAP_TOP + 2;
+        const atHalf = sheetTopVal.current >= SNAP_HALF - 2;
+
+        // list sabse upar + neeche kheencha -> map badhao
+        if (down && scrollY.current <= 0 && !atHalf) return true;
+        // map bada hai + upar kheencha -> map wapas chhota
+        if (!down && !atTop) return true;
+        // baaki sab: normal scroll
+        return false;
+      },
+      onPanResponderGrant: () => {
+        sheetTop.stopAnimation();
+        dragStart.current = sheetTopVal.current;
+      },
+      onPanResponderMove: (_, g) => {
+        sheetTop.setValue(
+          Math.min(SNAP_HALF, Math.max(SNAP_TOP, dragStart.current + g.dy)),
+        );
+      },
+      onPanResponderRelease: (_, g) => {
+        const mid = (SNAP_TOP + SNAP_HALF) / 2;
+        const half =
+          g.vy > 0.4 ? true : g.vy < -0.4 ? false : sheetTopVal.current > mid;
+        snapTo(half);
+      },
+      onPanResponderTerminate: () => {
+        snapTo(sheetTopVal.current > (SNAP_TOP + SNAP_HALF) / 2);
+      },
+    }),
+  ).current;
+
+  // map ka center hamesha visible hisse ke beech me rahe (route chhupe nahi)
+  const mapTranslateY = sheetTop.interpolate({
+    inputRange: [SNAP_TOP, SNAP_HALF],
+    outputRange: [(SNAP_TOP - MAP_H) / 2, (SNAP_HALF - MAP_H) / 2],
+    extrapolate: 'clamp',
+  });
+
+  // distance / time pills sheet ke upar-upar chalein
+  const pillsTop = sheetTop.interpolate({
+    inputRange: [SNAP_TOP, SNAP_HALF],
+    outputRange: [SNAP_TOP - 46, SNAP_HALF - 46],
+    extrapolate: 'clamp',
+  });
 
   const routeCoords = useMemo(
     () => (route?.encodedPolyline ? decodePolyline(route.encodedPolyline) : []),
@@ -450,7 +539,7 @@ export default function BookingScreen({
     };
   }, [pickup, drop, service]);
 
-  // fit the map to the route / markers
+  // fit the map to the route / markers (visible patti ke andar)
   useEffect(() => {
     const points = routeCoords.length
       ? routeCoords
@@ -466,7 +555,12 @@ export default function BookingScreen({
       );
     } else if (points.length > 1) {
       mapRef.current?.fitToCoordinates(points, {
-        edgePadding: { top: 60, right: 60, bottom: 60, left: 60 },
+        edgePadding: {
+          top: FIT_PAD_V + 70, // upar back button ke liye jagah
+          right: 50,
+          bottom: FIT_PAD_V + 40, // neeche distance/time pills ke liye jagah
+          left: 50,
+        },
         animated: true,
       });
     }
@@ -653,24 +747,18 @@ export default function BookingScreen({
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={onBack} style={styles.backBtn} activeOpacity={0.7}>
-          <Ionicons name="arrow-back" size={22} color={BLACK} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>{TITLES[service]}</Text>
-        <View style={styles.backBtnSpacer} />
-      </View>
-
-      <ScrollView
-        contentContainerStyle={styles.scroll}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Google Map + route preview */}
-        <View style={styles.map}>
+      {/* Map + sheet ka area (footer ke upar) */}
+      <View style={styles.flex}>
+        {/* MAP (sabse peeche, route ke saath) */}
+        <Animated.View
+          style={[
+            styles.mapWrap,
+            { height: MAP_H, transform: [{ translateY: mapTranslateY }] },
+          ]}
+        >
           <MapView
             ref={mapRef}
+            provider={PROVIDER_GOOGLE}
             style={StyleSheet.absoluteFill}
             initialRegion={{
               latitude: pickup.latitude,
@@ -709,34 +797,6 @@ export default function BookingScreen({
             )}
           </MapView>
 
-          {/* Distance + time floating on the map */}
-          {drop && (
-            <View style={styles.mapPills}>
-              {routeLoading ? (
-                <View style={styles.mapPill}>
-                  <ActivityIndicator size="small" color={BLUE} />
-                  <Text style={styles.mapPillText}>Finding route...</Text>
-                </View>
-              ) : route ? (
-                <>
-                  <View style={styles.mapPill}>
-                    <Ionicons name="navigate" size={14} color={BLUE} />
-                    <Text style={styles.mapPillText}>{route.distanceKm} km</Text>
-                  </View>
-                  <View style={styles.mapPill}>
-                    <Ionicons name="time-outline" size={14} color={BLUE} />
-                    <Text style={styles.mapPillText}>{route.durationMinutes} min</Text>
-                  </View>
-                </>
-              ) : (
-                <View style={styles.mapPill}>
-                  <Ionicons name="alert-circle-outline" size={14} color={RED} />
-                  <Text style={styles.mapPillText}>Route not available</Text>
-                </View>
-              )}
-            </View>
-          )}
-
           {mapStatus === 'failed' && (
             <View style={styles.mapError}>
               <Text style={styles.mapErrorText}>
@@ -744,296 +804,359 @@ export default function BookingScreen({
               </Text>
             </View>
           )}
+        </Animated.View>
+
+        {/* Back button + title (map ke upar) */}
+        <View style={styles.topBar} pointerEvents="box-none">
+          <TouchableOpacity onPress={onBack} style={styles.backBtn} activeOpacity={0.8}>
+            <Ionicons name="arrow-back" size={22} color={BLACK} />
+          </TouchableOpacity>
+          <View style={styles.titlePill}>
+            <Text style={styles.titleText}>{TITLES[service]}</Text>
+          </View>
         </View>
 
-        {/* Locations (timeline) */}
-        <View style={styles.locCard}>
-          <View style={styles.timeline}>
-            <View style={styles.pickupDot} />
-            <View style={styles.timelineLine} />
-            <View style={styles.dropSquare} />
-          </View>
-
-          <View style={styles.flex}>
-            <TouchableOpacity
-              style={styles.locRow}
-              activeOpacity={0.7}
-              onPress={() => setPicking('pickup')}
-            >
-              <View style={styles.flex}>
-                <Text style={styles.locLabel}>
-                  {needsReceiver ? 'PICKUP PARCEL FROM' : 'PICKUP'}
-                </Text>
-                <Text style={styles.locValue} numberOfLines={1}>
-                  {pickup.address}
-                </Text>
+        {/* Distance + time (sheet ke saath upar-neeche hota hai) */}
+        {drop && (
+          <Animated.View style={[styles.mapPills, { top: pillsTop }]} pointerEvents="none">
+            {routeLoading ? (
+              <View style={styles.mapPill}>
+                <ActivityIndicator size="small" color={BLUE} />
+                <Text style={styles.mapPillText}>Finding route...</Text>
               </View>
-              <Ionicons name="chevron-forward" size={20} color={GREY} />
-            </TouchableOpacity>
+            ) : route ? (
+              <>
+                <View style={styles.mapPill}>
+                  <Ionicons name="navigate" size={14} color={BLUE} />
+                  <Text style={styles.mapPillText}>{route.distanceKm} km</Text>
+                </View>
+                <View style={styles.mapPill}>
+                  <Ionicons name="time-outline" size={14} color={BLUE} />
+                  <Text style={styles.mapPillText}>{route.durationMinutes} min</Text>
+                </View>
+              </>
+            ) : (
+              <View style={styles.mapPill}>
+                <Ionicons name="alert-circle-outline" size={14} color={RED} />
+                <Text style={styles.mapPillText}>Route not available</Text>
+              </View>
+            )}
+          </Animated.View>
+        )}
 
-            <View style={styles.divider} />
+        {/* BOTTOM SHEET */}
+        <Animated.View
+          style={[styles.sheet, { top: sheetTop }]}
+          {...panResponder.panHandlers}
+        >
+          <View style={styles.handle} />
 
-            <TouchableOpacity
-              style={styles.locRow}
-              activeOpacity={0.7}
-              onPress={() => setPicking('drop')}
-            >
+          <ScrollView
+            contentContainerStyle={styles.scroll}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            scrollEnabled={!mapExpanded}
+            scrollEventThrottle={16}
+            onScroll={(e) => {
+              scrollY.current = e.nativeEvent.contentOffset.y;
+              hideTabBar(e);  
+            }}
+          >
+            {/* Locations (timeline) */}
+            <View style={styles.locCard}>
+              <View style={styles.timeline}>
+                <View style={styles.pickupDot} />
+                <View style={styles.timelineLine} />
+                <View style={styles.dropSquare} />
+              </View>
+
               <View style={styles.flex}>
-                <Text style={styles.locLabel}>{needsReceiver ? 'DELIVER TO' : 'DROP'}</Text>
-                <Text
-                  style={[styles.locValue, !drop && styles.locPlaceholder]}
-                  numberOfLines={1}
+                <TouchableOpacity
+                  style={styles.locRow}
+                  activeOpacity={0.7}
+                  onPress={() => setPicking('pickup')}
                 >
-                  {drop ? drop.address : 'Choose drop location'}
-                </Text>
-              </View>
-              <Ionicons name="chevron-forward" size={20} color={GREY} />
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Group selector (Cab/Auto, Walk/Cycle/Bike/Auto/Cab, Auto/Truck) */}
-        {showGroups &&
-          (groups.length <= 2 ? (
-            <View style={styles.gRow}>{groups.map((g) => renderGroupCard(g, false))}</View>
-          ) : (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.gScrollWrap}
-              contentContainerStyle={styles.vRow}
-            >
-              {groups.map((g) => renderGroupCard(g, true))}
-            </ScrollView>
-          ))}
-
-        {/* Vehicle categories (only when the group has more than one option) */}
-        {showVariants && group && (
-          <>
-            <Text style={styles.sectionTitle}>{variantsTitle}</Text>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.vRow}
-            >
-              {group.variants.map((v) => {
-                const active = v.id === selected?.id;
-                return (
-                  <TouchableOpacity
-                    key={v.id}
-                    activeOpacity={0.85}
-                    onPress={() => setSelectedId(v.id)}
-                    style={[styles.vCard, active && styles.vCardActive]}
-                  >
-                    {active && (
-                      <View style={styles.checkBadge}>
-                        <Ionicons name="checkmark-circle" size={18} color={BLUE} />
-                      </View>
-                    )}
-                    <VehicleIcon iconKey={v.icon ?? v.id} emoji={v.emoji} />
-                    <Text style={styles.vName}>{v.name}</Text>
-                    <Text style={styles.vSub}>{v.sub}</Text>
-                    <Text style={[styles.vPrice, !drop && styles.vPriceHint]}>
-                      {priceText(v.id)}
+                  <View style={styles.flex}>
+                    <Text style={styles.locLabel}>
+                      {needsReceiver ? 'PICKUP PARCEL FROM' : 'PICKUP'}
                     </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </>
-        )}
-
-        {/* Set your own fare */}
-        {drop && estimatedFare != null && finalFare != null && (
-          <View style={styles.fareCard}>
-            <View style={styles.fareHead}>
-              <View style={styles.fareHeadIcon}>
-                <Ionicons name="cash-outline" size={20} color={BLUE} />
-              </View>
-              <View style={styles.flex}>
-                <Text style={styles.fareTitle}>Your offer</Text>
-                <Text style={styles.fareHint}>
-                  Offer more to get a captain faster
-                </Text>
-              </View>
-              {offerFare != null && (
-                <TouchableOpacity onPress={() => setOfferFare(null)} activeOpacity={0.7}>
-                  <Text style={styles.fareReset}>Reset</Text>
+                    <Text style={styles.locValue} numberOfLines={1}>
+                      {pickup.address}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color={GREY} />
                 </TouchableOpacity>
-              )}
-            </View>
 
-            <View style={styles.fareRow}>
-              <TouchableOpacity
-                style={[styles.fareBtn, finalFare <= (minOffer ?? 0) && styles.fareBtnOff]}
-                activeOpacity={0.8}
-                onPress={() => changeFare(-FARE_STEP)}
-                disabled={finalFare <= (minOffer ?? 0)}
-              >
-                <Ionicons name="remove" size={24} color={BLUE} />
-              </TouchableOpacity>
+                <View style={styles.divider} />
 
-              <Text style={styles.fareValue}>₹{finalFare}</Text>
-
-              <TouchableOpacity
-                style={[styles.fareBtn, finalFare >= (maxOffer ?? 0) && styles.fareBtnOff]}
-                activeOpacity={0.8}
-                onPress={() => changeFare(FARE_STEP)}
-                disabled={finalFare >= (maxOffer ?? 0)}
-              >
-                <Ionicons name="add" size={24} color={BLUE} />
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.fareMetaRow}>
-              <View style={styles.fareMetaChip}>
-                <Text style={styles.fareMetaText}>Estimated ₹{estimatedFare}</Text>
-              </View>
-              <View style={styles.fareMetaChip}>
-                <Text style={styles.fareMetaText}>
-                  Range ₹{minOffer} - ₹{maxOffer}
-                </Text>
-              </View>
-            </View>
-          </View>
-        )}
-
-        {/* What are you sending? (parcel / goods) */}
-        {items.length > 0 && (
-          <>
-            <Text style={[styles.sectionTitle, styles.itemsTitle]}>What are you sending?</Text>
-            <Text style={styles.itemsHint}>
-              Pick an item and we will suggest a vehicle
-            </Text>
-            <View style={styles.chipWrap}>
-              {items.map((it) => {
-                const active = it.id === itemId;
-                return (
-                  <TouchableOpacity
-                    key={it.id}
-                    activeOpacity={0.85}
-                    onPress={() => onItemPress(it)}
-                    style={[styles.chip, active && styles.chipActive]}
-                  >
-                    <Text style={styles.chipEmoji}>{it.emoji}</Text>
-                    <Text style={[styles.chipText, active && styles.chipTextActive]}>
-                      {it.label}
+                <TouchableOpacity
+                  style={styles.locRow}
+                  activeOpacity={0.7}
+                  onPress={() => setPicking('drop')}
+                >
+                  <View style={styles.flex}>
+                    <Text style={styles.locLabel}>{needsReceiver ? 'DELIVER TO' : 'DROP'}</Text>
+                    <Text
+                      style={[styles.locValue, !drop && styles.locPlaceholder]}
+                      numberOfLines={1}
+                    >
+                      {drop ? drop.address : 'Choose drop location'}
                     </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </>
-        )}
-
-        {/* Parcel description + receiver (parcel / goods / send) */}
-        {needsReceiver && (
-          <>
-            {/* Parcel description */}
-            <Text style={[styles.sectionTitle, styles.itemsTitle]}>Parcel details</Text>
-            <View style={styles.receiverCard}>
-              <Text style={styles.inputLabel}>Describe your parcel</Text>
-              <View
-                style={[
-                  styles.inputWrap,
-                  styles.inputWrapMulti,
-                  submitted && !!errors.parcelDescription && styles.inputError,
-                ]}
-              >
-                <Ionicons
-                  name="cube-outline"
-                  size={20}
-                  color={GREY}
-                  style={styles.inputIconTop}
-                />
-                <TextInput
-                  style={[styles.input, styles.inputMulti]}
-                  placeholder="e.g. Document envelope, 2 kg box"
-                  placeholderTextColor="#94A3B8"
-                  value={parcelDescription}
-                  onChangeText={setParcelDescription}
-                  multiline
-                />
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color={GREY} />
+                </TouchableOpacity>
               </View>
-              {submitted && !!errors.parcelDescription && (
-                <Text style={styles.error}>{errors.parcelDescription}</Text>
-              )}
             </View>
 
-            {/* Receiver */}
-            <Text style={[styles.sectionTitle, styles.itemsTitle]}>Receiver details</Text>
-            <View style={styles.receiverCard}>
-              <Text style={styles.inputLabel}>Receiver name</Text>
-              <View
-                style={[
-                  styles.inputWrap,
-                  useMyDetails && !!receiverName && styles.inputLocked,
-                  submitted && !!errors.receiverName && styles.inputError,
-                ]}
-              >
-                <Ionicons name="person-outline" size={20} color={GREY} style={styles.inputIcon} />
-                <TextInput
-                  style={styles.input}
-                  placeholder="e.g. Amit Sharma"
-                  placeholderTextColor="#94A3B8"
-                  value={receiverName}
-                  onChangeText={setReceiverName}
-                  autoCapitalize="words"
-                  editable={!(useMyDetails && !!receiverName)}
-                />
-              </View>
-              {submitted && !!errors.receiverName && (
-                <Text style={styles.error}>{errors.receiverName}</Text>
-              )}
+            {/* Group selector (Cab/Auto, Walk/Cycle/Bike/Auto/Cab, Auto/Truck) */}
+            {showGroups &&
+              (groups.length <= 2 ? (
+                <View style={styles.gRow}>{groups.map((g) => renderGroupCard(g, false))}</View>
+              ) : (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.gScrollWrap}
+                  contentContainerStyle={styles.vRow}
+                >
+                  {groups.map((g) => renderGroupCard(g, true))}
+                </ScrollView>
+              ))}
 
-              <Text style={[styles.inputLabel, styles.inputGap]}>Receiver mobile number</Text>
-              <View
-                style={[
-                  styles.inputWrap,
-                  useMyDetails && !!receiverPhone && styles.inputLocked,
-                  submitted && !!errors.receiverPhone && styles.inputError,
-                ]}
-              >
-                <Ionicons name="call-outline" size={20} color={GREY} style={styles.inputIcon} />
-                <Text style={styles.phonePrefix}>+91</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="10 digit mobile number"
-                  placeholderTextColor="#94A3B8"
-                  value={receiverPhone}
-                  onChangeText={(t) => setReceiverPhone(t.replace(/\D/g, '').slice(0, 10))}
-                  keyboardType="number-pad"
-                  maxLength={10}
-                  editable={!(useMyDetails && !!receiverPhone)}
-                />
-              </View>
-              {submitted && !!errors.receiverPhone && (
-                <Text style={styles.error}>{errors.receiverPhone}</Text>
-              )}
+            {/* Vehicle categories (only when the group has more than one option) */}
+            {showVariants && group && (
+              <>
+                <Text style={styles.sectionTitle}>{variantsTitle}</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.vRow}
+                >
+                  {group.variants.map((v) => {
+                    const active = v.id === selected?.id;
+                    return (
+                      <TouchableOpacity
+                        key={v.id}
+                        activeOpacity={0.85}
+                        onPress={() => setSelectedId(v.id)}
+                        style={[styles.vCard, active && styles.vCardActive]}
+                      >
+                        {active && (
+                          <View style={styles.checkBadge}>
+                            <Ionicons name="checkmark-circle" size={18} color={BLUE} />
+                          </View>
+                        )}
+                        <VehicleIcon iconKey={v.icon ?? v.id} emoji={v.emoji} />
+                        <Text style={styles.vName}>{v.name}</Text>
+                        <Text style={styles.vSub}>{v.sub}</Text>
+                        <Text style={[styles.vPrice, !drop && styles.vPriceHint]}>
+                          {priceText(v.id)}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </>
+            )}
 
-              {/* Tick: fill the receiver with my (sender's) details */}
-              <TouchableOpacity
-                style={styles.tickRow}
-                activeOpacity={0.8}
-                onPress={onToggleMyDetails}
-                disabled={profileLoading}
-              >
-                <View style={[styles.tickBox, useMyDetails && styles.tickBoxOn]}>
-                  {profileLoading ? (
-                    <ActivityIndicator size="small" color={BLUE} />
-                  ) : (
-                    useMyDetails && <Ionicons name="checkmark" size={16} color="#fff" />
+            {/* Set your own fare */}
+            {drop && estimatedFare != null && finalFare != null && (
+              <View style={styles.fareCard}>
+                <View style={styles.fareHead}>
+                  <View style={styles.fareHeadIcon}>
+                    <Ionicons name="cash-outline" size={20} color={BLUE} />
+                  </View>
+                  <View style={styles.flex}>
+                    <Text style={styles.fareTitle}>Your offer</Text>
+                    <Text style={styles.fareHint}>
+                      Offer more to get a captain faster
+                    </Text>
+                  </View>
+                  {offerFare != null && (
+                    <TouchableOpacity onPress={() => setOfferFare(null)} activeOpacity={0.7}>
+                      <Text style={styles.fareReset}>Reset</Text>
+                    </TouchableOpacity>
                   )}
                 </View>
-                <View style={styles.flex}>
-                  <Text style={styles.tickText}>I am the receiver</Text>
-                  <Text style={styles.tickSub}>Fill in my details as the receiver</Text>
+
+                <View style={styles.fareRow}>
+                  <TouchableOpacity
+                    style={[styles.fareBtn, finalFare <= (minOffer ?? 0) && styles.fareBtnOff]}
+                    activeOpacity={0.8}
+                    onPress={() => changeFare(-FARE_STEP)}
+                    disabled={finalFare <= (minOffer ?? 0)}
+                  >
+                    <Ionicons name="remove" size={24} color={BLUE} />
+                  </TouchableOpacity>
+
+                  <Text style={styles.fareValue}>₹{finalFare}</Text>
+
+                  <TouchableOpacity
+                    style={[styles.fareBtn, finalFare >= (maxOffer ?? 0) && styles.fareBtnOff]}
+                    activeOpacity={0.8}
+                    onPress={() => changeFare(FARE_STEP)}
+                    disabled={finalFare >= (maxOffer ?? 0)}
+                  >
+                    <Ionicons name="add" size={24} color={BLUE} />
+                  </TouchableOpacity>
                 </View>
-              </TouchableOpacity>
-            </View>
-          </>
-        )}
-      </ScrollView>
+
+                <View style={styles.fareMetaRow}>
+                  <View style={styles.fareMetaChip}>
+                    <Text style={styles.fareMetaText}>Estimated ₹{estimatedFare}</Text>
+                  </View>
+                  <View style={styles.fareMetaChip}>
+                    <Text style={styles.fareMetaText}>
+                      Range ₹{minOffer} - ₹{maxOffer}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            )}
+
+            {/* What are you sending? (parcel / goods) */}
+            {items.length > 0 && (
+              <>
+                <Text style={[styles.sectionTitle, styles.itemsTitle]}>What are you sending?</Text>
+                <Text style={styles.itemsHint}>
+                  Pick an item and we will suggest a vehicle
+                </Text>
+                <View style={styles.chipWrap}>
+                  {items.map((it) => {
+                    const active = it.id === itemId;
+                    return (
+                      <TouchableOpacity
+                        key={it.id}
+                        activeOpacity={0.85}
+                        onPress={() => onItemPress(it)}
+                        style={[styles.chip, active && styles.chipActive]}
+                      >
+                        <Text style={styles.chipEmoji}>{it.emoji}</Text>
+                        <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                          {it.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+
+            {/* Parcel description + receiver (parcel / goods / send) */}
+            {needsReceiver && (
+              <>
+                {/* Parcel description */}
+                <Text style={[styles.sectionTitle, styles.itemsTitle]}>Parcel details</Text>
+                <View style={styles.receiverCard}>
+                  <Text style={styles.inputLabel}>Describe your parcel</Text>
+                  <View
+                    style={[
+                      styles.inputWrap,
+                      styles.inputWrapMulti,
+                      submitted && !!errors.parcelDescription && styles.inputError,
+                    ]}
+                  >
+                    <Ionicons
+                      name="cube-outline"
+                      size={20}
+                      color={GREY}
+                      style={styles.inputIconTop}
+                    />
+                    <TextInput
+                      style={[styles.input, styles.inputMulti]}
+                      placeholder="e.g. Document envelope, 2 kg box"
+                      placeholderTextColor="#94A3B8"
+                      value={parcelDescription}
+                      onChangeText={setParcelDescription}
+                      multiline
+                    />
+                  </View>
+                  {submitted && !!errors.parcelDescription && (
+                    <Text style={styles.error}>{errors.parcelDescription}</Text>
+                  )}
+                </View>
+
+                {/* Receiver */}
+                <Text style={[styles.sectionTitle, styles.itemsTitle]}>Receiver details</Text>
+                <View style={styles.receiverCard}>
+                  <Text style={styles.inputLabel}>Receiver name</Text>
+                  <View
+                    style={[
+                      styles.inputWrap,
+                      useMyDetails && !!receiverName && styles.inputLocked,
+                      submitted && !!errors.receiverName && styles.inputError,
+                    ]}
+                  >
+                    <Ionicons
+                      name="person-outline"
+                      size={20}
+                      color={GREY}
+                      style={styles.inputIcon}
+                    />
+                    <TextInput
+                      style={styles.input}
+                      placeholder="e.g. Amit Sharma"
+                      placeholderTextColor="#94A3B8"
+                      value={receiverName}
+                      onChangeText={setReceiverName}
+                      autoCapitalize="words"
+                      editable={!(useMyDetails && !!receiverName)}
+                    />
+                  </View>
+                  {submitted && !!errors.receiverName && (
+                    <Text style={styles.error}>{errors.receiverName}</Text>
+                  )}
+
+                  <Text style={[styles.inputLabel, styles.inputGap]}>Receiver mobile number</Text>
+                  <View
+                    style={[
+                      styles.inputWrap,
+                      useMyDetails && !!receiverPhone && styles.inputLocked,
+                      submitted && !!errors.receiverPhone && styles.inputError,
+                    ]}
+                  >
+                    <Ionicons name="call-outline" size={20} color={GREY} style={styles.inputIcon} />
+                    <Text style={styles.phonePrefix}>+91</Text>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="10 digit mobile number"
+                      placeholderTextColor="#94A3B8"
+                      value={receiverPhone}
+                      onChangeText={(t) => setReceiverPhone(t.replace(/\D/g, '').slice(0, 10))}
+                      keyboardType="number-pad"
+                      maxLength={10}
+                      editable={!(useMyDetails && !!receiverPhone)}
+                    />
+                  </View>
+                  {submitted && !!errors.receiverPhone && (
+                    <Text style={styles.error}>{errors.receiverPhone}</Text>
+                  )}
+
+                  {/* Tick: fill the receiver with my (sender's) details */}
+                  <TouchableOpacity
+                    style={styles.tickRow}
+                    activeOpacity={0.8}
+                    onPress={onToggleMyDetails}
+                    disabled={profileLoading}
+                  >
+                    <View style={[styles.tickBox, useMyDetails && styles.tickBoxOn]}>
+                      {profileLoading ? (
+                        <ActivityIndicator size="small" color={BLUE} />
+                      ) : (
+                        useMyDetails && <Ionicons name="checkmark" size={16} color="#fff" />
+                      )}
+                    </View>
+                    <View style={styles.flex}>
+                      <Text style={styles.tickText}>I am the receiver</Text>
+                      <Text style={styles.tickSub}>Fill in my details as the receiver</Text>
+                    </View>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+          </ScrollView>
+        </Animated.View>
+      </View>
 
       {/* Book bar */}
       <View style={styles.footer}>
@@ -1080,44 +1203,18 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   container: { flex: 1, backgroundColor: BG },
 
-  // header
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    backgroundColor: '#fff',
-    elevation: 2,
-    shadowColor: BLACK,
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-  },
-  backBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: BG,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backBtnSpacer: { width: 40, height: 40 },
-  headerTitle: { fontSize: 18, fontWeight: '800', color: BLACK },
-  scroll: { padding: 16, paddingBottom: 24 },
-
   // map
-  map: {
-    height: 210,
-    borderRadius: 20,
+  mapWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
     backgroundColor: '#DCE8F8',
-    overflow: 'hidden',
-    marginBottom: 14,
   },
   mapPills: {
     position: 'absolute',
-    left: 10,
-    bottom: 10,
+    left: 14,
+    zIndex: 4,
     flexDirection: 'row',
   },
   mapPill: {
@@ -1143,6 +1240,69 @@ const styles = StyleSheet.create({
     padding: 16,
   },
   mapErrorText: { color: '#fff', fontSize: 13, textAlign: 'center' },
+
+  // top bar (map ke upar)
+  topBar: {
+    position: 'absolute',
+    top: 10,
+    left: 14,
+    right: 14,
+    zIndex: 5,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  backBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+    shadowColor: BLACK,
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  titlePill: {
+    backgroundColor: '#fff',
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    marginLeft: 10,
+    elevation: 4,
+    shadowColor: BLACK,
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  titleText: { fontSize: 15, fontWeight: '800', color: BLACK },
+
+  // bottom sheet
+  sheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: BG,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    elevation: 12,
+    shadowColor: BLACK,
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -3 },
+  },
+  handle: {
+    alignSelf: 'center',
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#CBD5E1',
+    marginTop: 8,
+    marginBottom: 6,
+  },
+  scroll: { padding: 16, paddingBottom: 24 },
 
   // locations (timeline)
   locCard: {

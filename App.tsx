@@ -15,42 +15,38 @@ import EditProfileScreen from './src/EditProfileScreen';
 import LoginScreen from './src/features/auth/screens/LoginScreen';
 import HomeScreen from './src/features/home/screens/HomeScreen';
 import EditCaptainScreen from './src/EditCaptainScreen';
-import CaptainRideScreen from './src/CaptainRideScreen';
 import CaptainRidePreferencesScreen from './src/CaptainRidePreferencesScreen';
-
+// Captain ki nayi ride tracking screen (CaptainHomeScreen wale folder me rakho)
+import CaptainRideTrackingScreen from './src/CaptainRideTrackingScreen';
 import ProfileScreen from './src/features/profile/screens/ProfileScreen';
 import BecomeCaptainScreen from './src/features/BecomeCaptainScreen';
 import CaptainHomeScreen from './src/features/CaptainHomeScreen';
 // RideTrackingScreen.tsx ko BookingScreen wale folder (src/) me rakho
 import RideTrackingScreen from './src/RideTrackingScreen';
 import CaptainRegisterScreen from './src/features/CaptainRegister';
+// Admin screens
+import AdminHomeScreen from './src/admin/AdminHomeScreen';
+import CaptainDetailScreen from './src/admin/CaptainDetailScreen';
+import AdminProfileScreen from './src/admin/AdminProfileScreen';
 import {
   RootStackParamList,
   MainTabParamList,
   CaptainTabParamList,
+  AdminTabParamList,
 } from './src/types/navigation';
-import { colors } from './src/constants/colors';
-import { getToken, setOnUnauthorized } from './src/services/api';
+import AppTabBar from './src/components/AppTabBar';
+import { getToken, getRole, setOnUnauthorized } from './src/services/api';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<MainTabParamList>();
 const CaptainTab = createBottomTabNavigator<CaptainTabParamList>();
+const AdminTab = createBottomTabNavigator<AdminTabParamList>();
 
 const navigationRef = createNavigationContainerRef<RootStackParamList>();
 
-// Dono tab bars ka same look
+// Teeno tab bars ka same look (AppTabBar custom bar use hota hai)
 const tabScreenOptions = {
   headerShown: false,
-  tabBarActiveTintColor: colors.primary,
-  tabBarInactiveTintColor: colors.muted,
-  tabBarLabelStyle: { fontSize: 11, fontWeight: '700' as const, marginBottom: 4 },
-  tabBarStyle: {
-    height: 62,
-    paddingTop: 6,
-    backgroundColor: '#fff',
-    borderTopWidth: 0,
-    elevation: 12,
-  },
 };
 
 // Active = filled icon, inactive = outline icon
@@ -61,7 +57,9 @@ const icon =
 
 function MainTabs() {
   return (
-    <Tab.Navigator screenOptions={tabScreenOptions}>
+    <Tab.Navigator
+      screenOptions={tabScreenOptions}
+      tabBar={props => <AppTabBar {...props} />}>
       <Tab.Screen
         name="Home"
         component={HomeScreen}
@@ -76,9 +74,12 @@ function MainTabs() {
   );
 }
 
+// Captain tabs: sirf Home + Profile. Ride screen yaha nahi, neeche root Stack me hai.
 function CaptainTabs() {
   return (
-    <CaptainTab.Navigator screenOptions={tabScreenOptions}>
+    <CaptainTab.Navigator
+      screenOptions={tabScreenOptions}
+      tabBar={props => <AppTabBar {...props} />}>
       <CaptainTab.Screen
         name="CaptainHome"
         component={CaptainHomeScreen}
@@ -90,6 +91,26 @@ function CaptainTabs() {
         options={{ title: 'Profile', tabBarIcon: icon('person', 'person-outline') }}
       />
     </CaptainTab.Navigator>
+  );
+}
+
+// Admin tabs: Home (dashboard + captain requests) + Profile (admin ki detail)
+function AdminTabs() {
+  return (
+    <AdminTab.Navigator
+      screenOptions={tabScreenOptions}
+      tabBar={props => <AppTabBar {...props} />}>
+      <AdminTab.Screen
+        name="AdminHome"
+        component={AdminHomeScreen}
+        options={{ title: 'Home', tabBarIcon: icon('home', 'home-outline') }}
+      />
+      <AdminTab.Screen
+        name="AdminProfile"
+        component={AdminProfileScreen}
+        options={{ title: 'Profile', tabBarIcon: icon('person', 'person-outline') }}
+      />
+    </AdminTab.Navigator>
   );
 }
 
@@ -109,8 +130,12 @@ function RideTrackingRoute({
 }
 
 export default function App() {
-  // token hai to seedha MainTabs, warna Login
-  const initialRoute: keyof RootStackParamList = getToken() ? 'MainTabs' : 'Login';
+  // token nahi to Login, admin ho to AdminTabs, warna MainTabs
+  const initialRoute: keyof RootStackParamList = !getToken()
+    ? 'Login'
+    : getRole() === 'ADMIN'
+      ? 'AdminTabs'
+      : 'MainTabs';
 
   // kisi bhi API call pe 401 aaye (token expire) to Login pe bhej do
   useEffect(() => {
@@ -141,9 +166,13 @@ export default function App() {
           <Stack.Screen name="EditProfile" component={EditProfileScreen} />
           <Stack.Screen name="EditCaptain" component={EditCaptainScreen} />
           <Stack.Screen name="RideTracking" component={RideTrackingRoute} />
-          <Stack.Screen name="CaptainRide" component={CaptainRideScreen} />
+          {/* Captain ki ride screen: Home se navigate('CaptainRide', { captainRideId }) */}
+          <Stack.Screen name="CaptainRide" component={CaptainRideTrackingScreen} />
           <Stack.Screen name="CaptainRegister" component={CaptainRegisterScreen} />
           <Stack.Screen name="CaptainTabs" component={CaptainTabs} />
+          <Stack.Screen name="AdminTabs" component={AdminTabs} />
+          {/* Admin: captain ki poori detail (tabs ke bahar, full screen) */}
+          <Stack.Screen name="CaptainDetail" component={CaptainDetailScreen} />
         </Stack.Navigator>
       </NavigationContainer>
     </SafeAreaProvider>

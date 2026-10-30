@@ -18,6 +18,9 @@ import { RootStackParamList } from '../../../types/navigation';
 import { profileApi, ProfileUser, clearToken } from '../../../services/api';
 import { captainsApi, Captain } from '../../../services/captainsApi';
 
+// Scroll karne par tab bar hide karne ke liye
+import { useHideTabBarOnScroll } from '../../../components/AppTabBar';
+
 // Same palette as Home / Booking
 const BLUE = '#1F6FE5';
 const BLUE_DARK = '#1553B3';
@@ -28,6 +31,7 @@ const GREY = '#64748B';
 const BORDER = '#E2E8F0';
 const GREEN = '#16A34A';
 const RED = '#DC2626';
+const RED_LIGHT = '#FEE2E2';
 
 type MenuItem = {
   id: string;
@@ -46,6 +50,9 @@ const MENU: MenuItem[] = [
   { id: 'help', label: 'Help & Support', icon: 'headset-outline', color: '#DB2777', tint: '#FCE7F3' },
   { id: 'settings', label: 'Settings', icon: 'settings-outline', color: '#475569', tint: '#E2E8F0' },
 ];
+
+// Menu items jo isi screen me khulte hain
+const EXPANDABLE = ['settings'];
 
 const formatDate = (date: string | null | undefined) => {
   if (!date) return '-';
@@ -80,12 +87,18 @@ export default function ProfileScreen() {
   const navigation =
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 
+  // Scroll par tab bar hide / show
+  const hideTabBar = useHideTabBarOnScroll();
+
   const [profile, setProfile] = useState<ProfileUser | null>(null);
   const [captain, setCaptain] = useState<Captain | null>(null);
   const [loading, setLoading] = useState(true);
 
   // Personal information sirf tap karne se dikhegi
   const [showInfo, setShowInfo] = useState(false);
+
+  // Kaunsa menu option khula hai (abhi sirf Settings)
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
 
   // Pehli baar load hua ya nahi (loader sirf pehli baar dikhana hai)
   const hasLoadedOnce = useRef(false);
@@ -136,6 +149,12 @@ export default function ProfileScreen() {
   const isApproved = !!captain && !isPending && !isRejected;
 
   const onMenuPress = (id: string) => {
+    // Settings isi screen me khulta hai
+    if (EXPANDABLE.includes(id)) {
+      setOpenMenu((prev) => (prev === id ? null : id));
+      return;
+    }
+
     // Baaki screens baad me connect karenge
     console.log('Menu pressed:', id);
   };
@@ -249,6 +268,23 @@ export default function ProfileScreen() {
     },
   ];
 
+  // Settings dropdown: abhi sirf Logout
+  const renderSettingsContent = () => (
+    <View style={styles.expandBox}>
+      <TouchableOpacity
+        style={styles.settingRow}
+        activeOpacity={0.7}
+        onPress={onLogout}
+      >
+        <View style={[styles.settingIcon, { backgroundColor: RED_LIGHT }]}>
+          <Ionicons name="log-out-outline" size={18} color={RED} />
+        </View>
+        <Text style={[styles.settingLabel, { color: RED }]}>Logout</Text>
+        <Ionicons name="chevron-forward" size={18} color="#B5BCC8" />
+      </TouchableOpacity>
+    </View>
+  );
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <StatusBar barStyle="light-content" backgroundColor={BLUE} />
@@ -257,6 +293,8 @@ export default function ProfileScreen() {
         style={styles.scrollView}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scroll}
+        onScroll={hideTabBar}
+        scrollEventThrottle={16}
       >
         {/* Blue hero: avatar + name + phone + edit */}
         <View style={styles.hero}>
@@ -396,36 +434,42 @@ export default function ProfileScreen() {
 
           {/* Menu */}
           <View style={styles.card}>
-            {MENU.map((m, i) => (
-              <TouchableOpacity
-                key={m.id}
-                style={[
-                  styles.menuRow,
-                  i === MENU.length - 1 && styles.noBorder,
-                ]}
-                activeOpacity={0.7}
-                onPress={() => onMenuPress(m.id)}
-              >
-                <View style={[styles.menuIcon, { backgroundColor: m.tint }]}>
-                  <Ionicons name={m.icon} size={19} color={m.color} />
+            {MENU.map((m, i) => {
+              // Ek option khula ho to baaki chhupa do
+              if (openMenu && openMenu !== m.id) return null;
+
+              const isOpen = openMenu === m.id;
+              const isLast = i === MENU.length - 1;
+              const expandable = EXPANDABLE.includes(m.id);
+
+              return (
+                <View key={m.id}>
+                  <TouchableOpacity
+                    style={[
+                      styles.menuRow,
+                      (isLast || isOpen) && styles.noBorder,
+                    ]}
+                    activeOpacity={0.7}
+                    onPress={() => onMenuPress(m.id)}
+                  >
+                    <View style={[styles.menuIcon, { backgroundColor: m.tint }]}>
+                      <Ionicons name={m.icon} size={19} color={m.color} />
+                    </View>
+
+                    <Text style={styles.menuLabel}>{m.label}</Text>
+
+                    <Ionicons
+                      name={expandable && isOpen ? 'chevron-down' : 'chevron-forward'}
+                      size={20}
+                      color={expandable && isOpen ? BLUE : '#B5BCC8'}
+                    />
+                  </TouchableOpacity>
+
+                  {isOpen && m.id === 'settings' && renderSettingsContent()}
                 </View>
-
-                <Text style={styles.menuLabel}>{m.label}</Text>
-
-                <Ionicons name="chevron-forward" size={20} color="#B5BCC8" />
-              </TouchableOpacity>
-            ))}
+              );
+            })}
           </View>
-
-          {/* Logout */}
-          <TouchableOpacity
-            style={styles.logoutBtn}
-            activeOpacity={0.8}
-            onPress={onLogout}
-          >
-            <Ionicons name="log-out-outline" size={20} color={RED} />
-            <Text style={styles.logoutText}>Logout</Text>
-          </TouchableOpacity>
 
           <Text style={styles.version}>Raptor v1.0.0</Text>
         </View>
@@ -454,8 +498,9 @@ const styles = StyleSheet.create({
     backgroundColor: BG,
   },
 
+  // neeche floating tab bar ke liye extra jagah
   scroll: {
-    paddingBottom: 28,
+    paddingBottom: 110,
   },
 
   loaderContainer: {
@@ -798,29 +843,41 @@ const styles = StyleSheet.create({
     color: BLACK,
   },
 
-  // Logout
-  logoutBtn: {
-    flexDirection: 'row',
-    height: 50,
-    backgroundColor: '#fff',
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: RED,
-    alignItems: 'center',
-    justifyContent: 'center',
+  // Settings dropdown
+  expandBox: {
+    paddingBottom: 14,
   },
 
-  logoutText: {
-    color: RED,
-    fontWeight: '800',
-    fontSize: 15,
-    marginLeft: 8,
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: BG,
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    marginTop: 4,
+  },
+
+  settingIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+
+  settingLabel: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    color: BLACK,
   },
 
   version: {
     textAlign: 'center',
     fontSize: 11,
     color: GREY,
-    marginTop: 14,
+    marginTop: 4,
   },
 });

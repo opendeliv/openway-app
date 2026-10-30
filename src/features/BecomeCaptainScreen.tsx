@@ -21,6 +21,9 @@ import { captainDocumentsApi } from '../services/Captaindocumentsapi';
 // Same axios instance that the Home screen uses
 import api from '../services/CaptainaRideApi';
 
+// Scroll karne par tab bar hide karne ke liye
+import { useHideTabBarOnScroll } from '../components/AppTabBar';
+
 const BLUE = '#1F6FE5';
 const BLUE_DARK = '#1553B3';
 const BLUE_LIGHT = '#EAF2FF';
@@ -54,7 +57,7 @@ const MENU: MenuItem[] = [
 ];
 
 // Menu items that open inside this screen
-const EXPANDABLE = ['rides', 'preferences', 'documents'];
+const EXPANDABLE = ['rides', 'preferences', 'documents', 'settings'];
 
 // Default pickup range limits (used if the backend does not send them)
 const DEFAULT_MIN_RANGE = 1;
@@ -293,6 +296,9 @@ export default function BecomeCaptainScreen() {
   const navigation =
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 
+  // Scroll par tab bar hide / show
+  const hideTabBar = useHideTabBarOnScroll();
+
   const [captain, setCaptain] = useState<Captain | null>(null);
   const [docsInfo, setDocsInfo] = useState<MyDocumentsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -309,7 +315,7 @@ export default function BecomeCaptainScreen() {
   // Personal details show only when "Personal Information" is tapped
   const [showInfo, setShowInfo] = useState(false);
 
-  // Which menu option is open (My Rides / Preferences / Documents)
+  // Which menu option is open (My Rides / Preferences / Documents / Settings)
   const [openMenu, setOpenMenu] = useState<string | null>(null);
 
   // Show the full-screen loader only the first time
@@ -379,7 +385,7 @@ export default function BecomeCaptainScreen() {
   };
 
   const onMenuPress = (id: string) => {
-    // My Rides, Preferences and Documents open inside this screen
+    // My Rides, Preferences, Documents and Settings open inside this screen
     if (EXPANDABLE.includes(id)) {
       setOpenMenu((prev) => (prev === id ? null : id));
       return;
@@ -748,6 +754,23 @@ export default function BecomeCaptainScreen() {
     </View>
   );
 
+  // Settings: abhi sirf user profile par switch
+  const renderSettingsContent = () => (
+    <View style={styles.expandBox}>
+      <TouchableOpacity
+        style={styles.settingRow}
+        activeOpacity={0.7}
+        onPress={onSwitchToUser}
+      >
+        <View style={styles.settingIcon}>
+          <Ionicons name="swap-horizontal" size={18} color={BLUE} />
+        </View>
+        <Text style={styles.settingLabel}>Switch to User Profile</Text>
+        <Ionicons name="chevron-forward" size={18} color="#B5BCC8" />
+      </TouchableOpacity>
+    </View>
+  );
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <StatusBar barStyle="light-content" backgroundColor={BLUE} />
@@ -756,6 +779,8 @@ export default function BecomeCaptainScreen() {
         style={styles.scrollView}
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
+        onScroll={hideTabBar}
+        scrollEventThrottle={16}
       >
         {/* Blue hero: avatar + name + status */}
         <View style={styles.hero}>
@@ -919,6 +944,7 @@ export default function BecomeCaptainScreen() {
                   {isOpen && m.id === 'rides' && renderRidesContent()}
                   {isOpen && m.id === 'preferences' && renderPreferencesContent()}
                   {isOpen && m.id === 'documents' && renderDocumentsContent()}
+                  {isOpen && m.id === 'settings' && renderSettingsContent()}
 
                   {isOpen && !isLast && <View style={styles.menuSeparator} />}
                 </View>
@@ -927,18 +953,6 @@ export default function BecomeCaptainScreen() {
           </View>
         </View>
       </ScrollView>
-
-      {/* Switch to user profile */}
-      <View style={styles.footer}>
-        <TouchableOpacity
-          style={styles.switchBtn}
-          activeOpacity={0.9}
-          onPress={onSwitchToUser}
-        >
-          <Ionicons name="swap-horizontal" size={20} color="#fff" />
-          <Text style={styles.switchText}>Switch to User Profile</Text>
-        </TouchableOpacity>
-      </View>
     </SafeAreaView>
   );
 }
@@ -950,7 +964,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: BLUE },
   loadingContainer: { flex: 1, backgroundColor: BG },
   scrollView: { backgroundColor: BG },
-  scroll: { paddingBottom: 20 },
+  // neeche floating tab bar ke liye extra jagah
+  scroll: { paddingBottom: 110 },
   body: { paddingHorizontal: 16 },
   noBorder: { borderBottomWidth: 0 },
   btnDisabled: { opacity: 0.6 },
@@ -1247,25 +1262,24 @@ const styles = StyleSheet.create({
   },
   saveBtnText: { color: '#fff', fontSize: 14, fontWeight: '800', marginLeft: 8 },
 
-  // footer
-  footer: {
-    padding: 14,
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    elevation: 12,
-    shadowColor: BLACK,
-    shadowOpacity: 0.1,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: -3 },
-  },
-  switchBtn: {
+  // settings dropdown
+  settingRow: {
     flexDirection: 'row',
-    height: 50,
+    alignItems: 'center',
+    backgroundColor: BG,
     borderRadius: 14,
-    backgroundColor: BLUE,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    marginTop: 4,
+  },
+  settingIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    backgroundColor: BLUE_LIGHT,
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: 12,
   },
-  switchText: { color: '#fff', fontSize: 15, fontWeight: '800', marginLeft: 8 },
+  settingLabel: { flex: 1, fontSize: 14, fontWeight: '700', color: BLACK },
 });

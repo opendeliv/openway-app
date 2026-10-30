@@ -1,13 +1,17 @@
+import type { Captain } from '../admin/AdminHomeScreen'; // path adjust
 export type RootStackParamList = {
   Login: undefined;
   MainTabs: undefined;
   CaptainRegister: undefined;
   EditProfile: undefined;
-    CaptainRidePreferences: undefined;
+  CaptainRidePreferences: undefined;
   EditCaptain: undefined;
   CaptainTabs: undefined;
+
+    CaptainDetail: { captain: Captain }; // yahan badla
+  AdminTabs: undefined; // naya
   CaptainRide: { captainRideId: string };
-  RideTracking: { rideId: string }; // NAYA
+  RideTracking: { rideId: string };
 };
 
 export type MainTabParamList = {
@@ -18,4 +22,9 @@ export type MainTabParamList = {
 export type CaptainTabParamList = {
   CaptainHome: undefined;
   CaptainProfile: undefined;
+};
+
+export type AdminTabParamList = {
+  AdminHome: undefined;
+  AdminProfile: undefined;
 };

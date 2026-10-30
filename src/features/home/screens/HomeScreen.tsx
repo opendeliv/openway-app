@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Text,
   TouchableOpacity,
   StyleSheet,
@@ -10,16 +11,19 @@ import {
   BackHandler,
   PermissionsAndroid,
   Platform,
-  RefreshControl,
   Image,
+  Animated,
+  PanResponder,
+  Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import MapView, { PROVIDER_GOOGLE, Region } from 'react-native-maps';
 import Geolocation from '@react-native-community/geolocation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-
+import { useHideTabBarOnScroll } from '../../../components/AppTabBar';
 import BookingScreen from '../../../BookingScreen';
 import LocationPicker from '../../../LocationPicker';
 import { Place } from '../../../services/mapsApi';
@@ -36,8 +40,17 @@ const BG = '#F4F7FB';
 const BLACK = '#0F172A';
 const GREY = '#64748B';
 const GREEN = '#16A34A';
+const GREEN_DARK = '#15803D';
 const RED = '#EF4444';
 const BORDER = '#E2E8F0';
+
+// ---------- Map + bottom sheet (Rapido style) ----------
+const SCREEN_H = Dimensions.get('window').height;
+const SNAP_TOP = SCREEN_H * 0.2; // default: map chhota (sirf upar ki patti), sheet bada
+const SNAP_HALF = SCREEN_H * 0.5; // neeche kheencho: map aadha
+const MAP_H = SNAP_HALF + 40; // map ki fixed height (sheet ke peeche tak)
+const MAP_ZOOM = 0.006; // chhota number = zyada zoom
+const PIN_H = 62; // center pin ki total height (label + stem + dot)
 
 type Service = {
   id: string;
@@ -138,6 +151,12 @@ const MY_RIDES_URL = '/rides/my';
 // Home pe kitni rides dikhani hain
 const RECENT_LIMIT = 3;
 
+// Ye statuses "live" ride hain: tap par tracking khulni chahiye
+const ACTIVE_STATUSES = ['REQUESTED', 'ACCEPTED', 'ARRIVING', 'ARRIVED', 'STARTED'];
+
+// Itni purani ride ko "live" nahi maanenge (backend me atki hui purani ride galat na khule)
+const ACTIVE_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 3 ghante
+
 type UserRide = {
   id: string;
   category?: string | null; // RIDE / PARCEL / GOODS etc.
@@ -147,6 +166,14 @@ type UserRide = {
   createdAt?: string | null;
   completedAt?: string | null;
   cancelledAt?: string | null;
+};
+
+const isActiveRide = (r: UserRide) => {
+  if (!ACTIVE_STATUSES.includes((r.status ?? '').toUpperCase())) return false;
+  if (!r.createdAt) return true;
+  const t = new Date(r.createdAt).getTime();
+  if (Number.isNaN(t)) return true;
+  return Date.now() - t <= ACTIVE_MAX_AGE_MS;
 };
 
 const prettify = (s?: string | null) =>
@@ -176,6 +203,7 @@ const STATUS_LABEL: Record<string, string> = {
   ARRIVING: 'Captain arriving',
   ACCEPTED: 'Captain assigned',
   ASSIGNED: 'Captain assigned',
+  REQUESTED: 'Searching',
   PENDING: 'Searching',
   SEARCHING: 'Searching',
 };
@@ -207,7 +235,7 @@ const timeAgo = (iso?: string | null) => {
 
 export default function HomeScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-
+  const hideTabBar = useHideTabBarOnScroll();
   const [selectedService, setSelectedService] = useState<string | null>(null);
 
   // Trip: pickup (auto live location, change ho sakta hai) + drop (search bar se)
@@ -216,7 +244,6 @@ export default function HomeScreen() {
   const [picking, setPicking] = useState<'pickup' | 'drop' | null>(null);
   const [locLoading, setLocLoading] = useState(false);
   const [locDenied, setLocDenied] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
 
   // user ne pickup khud badla ho to auto-location usse overwrite na kare
   const manualPickup = useRef(false);
@@ -224,6 +251,141 @@ export default function HomeScreen() {
   // Recent activity: backend se asli rides
   const [recentRides, setRecentRides] = useState<UserRide[]>([]);
   const [recentLoaded, setRecentLoaded] = useState(false);
+
+  // Abhi chal rahi (complete / cancel nahi hui) ride. Jab tak ye hai, naya kaam block.
+  const [activeRide, setActiveRide] = useState<UserRide | null>(null);
+
+  // App launch par active ride mile to sirf ek baar auto-open karo
+  const resumedRef = useRef(false);
+
+  // ---------- Map + bottom sheet state ----------
+  const mapRef = useRef<MapView>(null);
+  const [mapExpanded, setMapExpanded] = useState(false); // true = map aadha
+
+  // Rapido-style pickup pin (pin fixed, map khiskta hai)
+  const dragging = useRef(false); // user ne map haath se khiyncha
+  const fromMap = useRef(false); // pickup map drag se aaya
+  const geoReq = useRef(0); // purani address request ignore karne ke liye
+  const [pinLifted, setPinLifted] = useState(false);
+  const [addrLoading, setAddrLoading] = useState(false);
+  const [pinH, setPinH] = useState(PIN_H);
+
+  const sheetTop = useRef(new Animated.Value(SNAP_TOP)).current;
+  const sheetTopVal = useRef(SNAP_TOP); // sheetTop ki current number value
+  const dragStart = useRef(SNAP_TOP);
+  const scrollY = useRef(0); // sheet ke andar ki list kitni scroll hui
+
+  useEffect(() => {
+    const id = sheetTop.addListener(({ value }) => {
+      sheetTopVal.current = value;
+    });
+    return () => sheetTop.removeListener(id);
+  }, [sheetTop]);
+
+  const snapTo = (half: boolean) => {
+    setMapExpanded(half);
+    Animated.spring(sheetTop, {
+      toValue: half ? SNAP_HALF : SNAP_TOP,
+      useNativeDriver: false,
+      speed: 14,
+      bounciness: 4,
+    }).start();
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponderCapture: (_, g) => {
+        // sirf vertical drag
+        if (Math.abs(g.dy) < 8 || Math.abs(g.dy) < Math.abs(g.dx)) return false;
+
+        const down = g.dy > 0;
+        const atTop = sheetTopVal.current <= SNAP_TOP + 2;
+        const atHalf = sheetTopVal.current >= SNAP_HALF - 2;
+
+        // list sabse upar + neeche kheencha -> map badhao
+        if (down && scrollY.current <= 0 && !atHalf) return true;
+        // map aadha hai + upar kheencha -> map wapas chhota
+        if (!down && !atTop) return true;
+        // baaki sab: normal scroll
+        return false;
+      },
+      onPanResponderGrant: () => {
+        sheetTop.stopAnimation();
+        dragStart.current = sheetTopVal.current;
+      },
+      onPanResponderMove: (_, g) => {
+        sheetTop.setValue(
+          Math.min(SNAP_HALF, Math.max(SNAP_TOP, dragStart.current + g.dy)),
+        );
+      },
+      onPanResponderRelease: (_, g) => {
+        const mid = (SNAP_TOP + SNAP_HALF) / 2;
+        const half =
+          g.vy > 0.4 ? true : g.vy < -0.4 ? false : sheetTopVal.current > mid;
+        snapTo(half);
+      },
+      onPanResponderTerminate: () => {
+        snapTo(sheetTopVal.current > (SNAP_TOP + SNAP_HALF) / 2);
+      },
+    }),
+  ).current;
+
+  // map ka center hamesha visible hisse ke beech me rahe (live location chhupe nahi)
+  const mapTranslateY = sheetTop.interpolate({
+    inputRange: [SNAP_TOP, SNAP_HALF],
+    outputRange: [(SNAP_TOP - MAP_H) / 2, (SNAP_HALF - MAP_H) / 2],
+    extrapolate: 'clamp',
+  });
+
+  // recenter button sheet ke upar-upar chale
+  const recenterTop = sheetTop.interpolate({
+    inputRange: [SNAP_TOP, SNAP_HALF],
+    outputRange: [SNAP_TOP - 56, SNAP_HALF - 56],
+    extrapolate: 'clamp',
+  });
+
+  // pickup badle to map wahan le jao (map drag se aaya ho to dobara animate nahi)
+  useEffect(() => {
+    if (!pickup) return;
+    if (fromMap.current) {
+      fromMap.current = false;
+      return;
+    }
+    mapRef.current?.animateToRegion(
+      {
+        latitude: pickup.latitude,
+        longitude: pickup.longitude,
+        latitudeDelta: MAP_ZOOM,
+        longitudeDelta: MAP_ZOOM,
+      },
+      600,
+    );
+  }, [pickup?.latitude, pickup?.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // user ne map khiyncha: pin thoda upar uthao
+  const onMapDragStart = () => {
+    dragging.current = true;
+    setPinLifted(true);
+  };
+
+  // map ruk gaya: center ki jagah = naya pickup
+  const onMapSettled = async (r: Region) => {
+    // animateToRegion se aaya event ignore, sirf user ka drag
+    if (!dragging.current) return;
+    dragging.current = false;
+    setPinLifted(false);
+
+    manualPickup.current = true; // GPS isse overwrite na kare
+    const id = ++geoReq.current;
+    setAddrLoading(true);
+
+    const address = await reverseGeocode(r.latitude, r.longitude);
+    if (id !== geoReq.current) return; // naya drag aa gaya, ye purana hai
+
+    fromMap.current = true;
+    setPickup({ address, latitude: r.latitude, longitude: r.longitude });
+    setAddrLoading(false);
+  };
 
   const fetchRecentRides = useCallback(async () => {
     try {
@@ -236,12 +398,23 @@ export default function HomeScreen() {
           new Date(b.createdAt ?? 0).getTime() - new Date(a.createdAt ?? 0).getTime(),
       );
       setRecentRides(sorted.slice(0, RECENT_LIMIT));
+
+      // Live ride (complete / cancel nahi hui)
+      const live = sorted.find(isActiveRide) ?? null;
+      setActiveRide(live);
+
+      // App kill -> dobara open: koi live ride hai to seedha tracking pe le jao.
+      // Sirf ek baar, taaki user back kare to Home use phir se na dhakele.
+      if (!resumedRef.current) {
+        resumedRef.current = true;
+        if (live) navigation.navigate('RideTracking', { rideId: live.id });
+      }
     } catch (e: any) {
       console.log('recent rides error', e?.response?.data || e?.message);
     } finally {
       setRecentLoaded(true);
     }
-  }, []);
+  }, [navigation]);
 
   // Home screen pe aate hi (aur ride se wapas aane par) fresh list
   useFocusEffect(
@@ -264,6 +437,7 @@ export default function HomeScreen() {
       setLocDenied(false);
 
       const { latitude, longitude } = await getPosition();
+      console.log('GPS COORDS', latitude, longitude);
       const address = await reverseGeocode(latitude, longitude);
 
       if (force) manualPickup.current = false;
@@ -290,13 +464,6 @@ export default function HomeScreen() {
     fetchCurrentLocation();
   }, [fetchCurrentLocation]);
 
-  // Pull to refresh: rides + location
-  const onRefresh = async () => {
-    setRefreshing(true);
-    await Promise.all([fetchRecentRides(), fetchCurrentLocation()]);
-    setRefreshing(false);
-  };
-
   const onLocationPicked = (place: Place) => {
     if (picking === 'pickup') {
       manualPickup.current = true;
@@ -308,8 +475,31 @@ export default function HomeScreen() {
     setPicking(null);
   };
 
+  // Live ride chal rahi ho to koi dusra kaam nahi: alert dikhao, true return karo (block)
+  const blockedByActiveRide = (): boolean => {
+    if (!activeRide) return false;
+    Alert.alert(
+      'Ride chal rahi hai',
+      'Aapki current ride abhi complete ya cancel nahi hui hai. Jab tak wo complete ya cancel nahi hoti, aap app me dusra kaam nahi kar sakte.',
+      [
+        { text: 'Ok', style: 'cancel' },
+        {
+          text: 'Track ride',
+          onPress: () => navigation.navigate('RideTracking', { rideId: activeRide.id }),
+        },
+      ],
+    );
+    return true;
+  };
+
   const onServicePress = (id: string) => {
+    if (blockedByActiveRide()) return;
     setSelectedService(id);
+  };
+
+  const openPicker = (which: 'pickup' | 'drop') => {
+    if (blockedByActiveRide()) return;
+    setPicking(which);
   };
 
   // Phone ka back button: booking screen se Home par wapas aaye, app band na ho
@@ -336,20 +526,62 @@ export default function HomeScreen() {
     );
   }
 
+  const mapStart = pickup ?? FALLBACK_PICKUP;
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <StatusBar barStyle="dark-content" />
 
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scroll}
-        keyboardShouldPersistTaps="handled"
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={BLUE} />
-        }
-      >
-        {/* Top bar: RAPTOR brand + bell */}
-        <View style={styles.topBar}>
+      <View style={styles.flex}>
+        {/* MAP (sabse peeche, live location ke saath) */}
+        <Animated.View
+          style={[
+            styles.mapWrap,
+            { height: MAP_H, transform: [{ translateY: mapTranslateY }] },
+          ]}
+        >
+          <MapView
+            ref={mapRef}
+            provider={PROVIDER_GOOGLE}
+            style={StyleSheet.absoluteFill}
+            initialRegion={{
+              latitude: mapStart.latitude,
+              longitude: mapStart.longitude,
+              latitudeDelta: MAP_ZOOM,
+              longitudeDelta: MAP_ZOOM,
+            }}
+            showsUserLocation
+            showsMyLocationButton={false}
+            showsCompass={false}
+            toolbarEnabled={false}
+            rotateEnabled={false}
+            pitchEnabled={false}
+            onPanDrag={onMapDragStart}
+            onRegionChangeComplete={onMapSettled}
+          />
+
+          {/* Fixed pickup pin: map ke center me, map khiskta hai pin nahi */}
+          <View
+            pointerEvents="none"
+            onLayout={(e) => setPinH(e.nativeEvent.layout.height)}
+            style={[
+              styles.centerPin,
+              { top: MAP_H / 2 - pinH + 11 },
+              pinLifted && styles.centerPinLifted,
+            ]}
+          >
+            <View style={styles.mapPinLabel}>
+              <Text style={styles.mapPinLabelText}>Pickup Point</Text>
+            </View>
+            <View style={styles.mapPinStem} />
+            <View style={styles.mapPinDotOuter}>
+              <View style={styles.mapPinDotInner} />
+            </View>
+          </View>
+        </Animated.View>
+
+        {/* Top bar: RAPTR logo + bell (map ke upar) */}
+        <View style={styles.topBar} pointerEvents="box-none">
           <Image source={{ uri: RAPTR_LOGO }} style={styles.logo} resizeMode="contain" />
 
           <TouchableOpacity style={styles.bell} activeOpacity={0.8}>
@@ -358,239 +590,273 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Greeting */}
-        <Text style={styles.greet}>{greeting()} 👋</Text>
-        <Text style={styles.greetSub}>Your next ride is just a tap aways</Text>
-
-        {/* Pickup + Drop card */}
-        <View style={styles.tripCard}>
-          {/* Pickup */}
+        {/* Recenter button (sheet ke saath upar-neeche hota hai) */}
+        <Animated.View style={[styles.recenter, { top: recenterTop }]}>
           <TouchableOpacity
-            style={styles.tripRow}
-            activeOpacity={0.7}
-            onPress={() => setPicking('pickup')}
-          >
-            <View style={styles.pickupDot} />
-            <View style={styles.flex}>
-              <Text style={styles.fieldLabel}>
-                {locDenied ? 'PICKUP • LOCATION OFF' : 'PICKUP'}
-              </Text>
-              {locLoading && !pickup ? (
-                <Text style={styles.fieldPlaceholder}>Location dhoondh rahe hain...</Text>
-              ) : (
-                <Text style={styles.fieldValue} numberOfLines={1}>
-                  {pickup?.address ?? FALLBACK_PICKUP.address}
-                </Text>
-              )}
-            </View>
-
-            {locLoading ? (
-              <ActivityIndicator color={BLUE} />
-            ) : (
-              <TouchableOpacity
-                style={styles.livePill}
-                activeOpacity={0.8}
-                onPress={() => fetchCurrentLocation(true)}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Ionicons name="locate" size={14} color={BLUE} />
-                <Text style={styles.livePillText}>Live</Text>
-              </TouchableOpacity>
-            )}
-          </TouchableOpacity>
-
-          {/* Drop (big search bar) */}
-          <TouchableOpacity
-            style={styles.dropBar}
+            onPress={() => fetchCurrentLocation(true)}
             activeOpacity={0.8}
-            onPress={() => setPicking('drop')}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           >
-            <View style={styles.dropSquare} />
-            <View style={styles.flex}>
-              {drop ? (
-                <>
-                  <Text style={styles.fieldLabel}>DROP</Text>
-                  <Text style={styles.fieldValue} numberOfLines={1}>
-                    {drop.address}
-                  </Text>
-                </>
-              ) : (
-                <Text style={styles.dropPlaceholder}>Where to?</Text>
-              )}
-            </View>
-
-            {drop ? (
-              <TouchableOpacity
-                style={styles.clearBtn}
-                onPress={() => setDrop(null)}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Ionicons name="close" size={16} color={GREY} />
-              </TouchableOpacity>
-            ) : (
-              <Ionicons name="search" size={20} color={GREY} />
-            )}
+            <Ionicons name="locate" size={22} color={BLUE} />
           </TouchableOpacity>
-        </View>
+        </Animated.View>
 
-        {/* Services */}
-        <Text style={styles.sectionTitle}>
-          {drop ? 'Choose a service for this trip' : 'Our services'}
-        </Text>
-        <View style={styles.servicesRow}>
-          {SERVICES.map((s) => (
-            <TouchableOpacity
-              key={s.id}
-              style={styles.serviceItem}
-              activeOpacity={0.8}
-              onPress={() => onServicePress(s.id)}
-            >
-              <View style={[styles.serviceIcon, { backgroundColor: s.tint }]}>
-                <Text style={styles.serviceEmoji}>{s.emoji}</Text>
-              </View>
-              <Text style={styles.serviceTitle}>{s.title}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+        {/* BOTTOM SHEET */}
+        <Animated.View style={[styles.sheet, { top: sheetTop }]} {...panResponder.panHandlers}>
+          <View style={styles.handle} />
 
-        {/* Parcel promo (drop chunne se pehle) */}
-        {!drop && (
-          <View style={styles.promo}>
-            <View style={styles.promoCircleBig} />
-            <View style={styles.promoCircleSmall} />
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.scroll}
+            keyboardShouldPersistTaps="handled"
+            scrollEnabled={!mapExpanded}
+            scrollEventThrottle={16}
+            onScroll={(e) => {
+              scrollY.current = e.nativeEvent.contentOffset.y;
+              hideTabBar(e);
+            }}
+          >
+            {/* Greeting */}
+            <Text style={styles.greet}>{greeting()} 👋</Text>
+            <Text style={styles.greetSub}>Your next ride is just a tap away</Text>
 
-            <View style={styles.promoTextWrap}>
-              <Text style={styles.promoTitle}>Send parcels in minutes</Text>
-              <Text style={styles.promoSub}>
-                Door-to-door delivery, person to person
-              </Text>
+            {/* Pickup + Drop card */}
+            <View style={styles.tripCard}>
+              {/* Pickup */}
               <TouchableOpacity
-                style={styles.promoBtn}
-                activeOpacity={0.85}
-                onPress={() => setSelectedService('parcel')}
+                style={styles.tripRow}
+                activeOpacity={0.7}
+                onPress={() => openPicker('pickup')}
               >
-                <Text style={styles.promoBtnText}>Send now</Text>
-                <Ionicons name="arrow-forward" size={14} color={BLUE} />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.promoEmoji}>📦</Text>
-          </View>
-        )}
-
-        {/* Why Raptor */}
-        <View style={styles.whyCard}>
-          {WHY_RAPTOR.map((w, i) => (
-            <View
-              key={w.id}
-              style={[styles.whyItem, i < WHY_RAPTOR.length - 1 && styles.whyDivider]}
-            >
-              <View style={styles.whyIcon}>
-                <Ionicons name={w.icon} size={20} color={BLUE} />
-              </View>
-              <Text style={styles.whyLabel}>{w.label}</Text>
-            </View>
-          ))}
-        </View>
-
-        {/* Recent activity: ride na ho to empty illustration */}
-        {recentLoaded && recentRides.length === 0 && (
-          <>
-            <View style={styles.sectionRow}>
-              <Text style={styles.sectionTitleInline}>Recent Activity</Text>
-            </View>
-
-            <View style={styles.emptyCard}>
-              {/* Illustration: soft circle + pin + taxi on a road */}
-              <View style={styles.emptyArt}>
-                <View style={styles.emptyCircle} />
-
-                {/* clouds */}
-                <View style={[styles.cloud, { top: 14, left: 10, width: 38 }]} />
-                <View style={[styles.cloud, { top: 34, right: 6, width: 28 }]} />
-
-                {/* floating location pin */}
-                <View style={styles.pinWrap}>
-                  <View style={styles.pinHead}>
-                    <View style={styles.pinHole} />
-                  </View>
-                  <View style={styles.pinTip} />
-                  <View style={styles.pinShadow} />
+                <View style={styles.pickupDot} />
+                <View style={styles.flex}>
+                  <Text style={styles.fieldLabel}>
+                    {locDenied ? 'PICKUP • LOCATION OFF' : 'PICKUP'}
+                  </Text>
+                  {(locLoading && !pickup) || addrLoading ? (
+                    <Text style={styles.fieldPlaceholder}>Location dhoondh rahe hain...</Text>
+                  ) : (
+                    <Text style={styles.fieldValue} numberOfLines={1}>
+                      {pickup?.address ?? FALLBACK_PICKUP.address}
+                    </Text>
+                  )}
                 </View>
 
-                {/* road + taxi */}
-                <View style={styles.emptyRoad}>
-                  <View style={styles.roadDash} />
-                  <View style={styles.roadDash} />
-                  <View style={styles.roadDash} />
-                </View>
-                <Text style={styles.emptyTaxi}>🚕</Text>
-              </View>
-
-              <Text style={styles.emptyTitle}>No rides yet</Text>
-              <Text style={styles.emptySub}>
-                Aapki pehli ride ya delivery{'\n'}yaha dikhegi
-              </Text>
-
-              <TouchableOpacity
-                style={styles.emptyBtn}
-                activeOpacity={0.85}
-                onPress={() => setSelectedService('bike')}
-              >
-                <Text style={styles.emptyBtnText}>Book your first ride</Text>
-              </TouchableOpacity>
-            </View>
-          </>
-        )}
-
-        {/* Recent activity: jab user ki rides ho */}
-        {recentRides.length > 0 && (
-          <>
-            <View style={styles.sectionRow}>
-              <Text style={styles.sectionTitleInline}>Recent Activity</Text>
-            </View>
-
-            <View style={styles.recentCard}>
-              {recentRides.map((r, i) => {
-                const look = rideLook(r);
-                const status = (r.status ?? '').toUpperCase();
-                const statusText = STATUS_LABEL[status] ?? prettify(r.status);
-                const when = timeAgo(r.completedAt ?? r.cancelledAt ?? r.createdAt);
-                const tone = statusTone(status);
-
-                return (
-                  <View
-                    key={r.id}
-                    style={[
-                      styles.recentRow,
-                      i === recentRides.length - 1 && styles.noBorder,
-                    ]}
+                {locLoading ? (
+                  <ActivityIndicator color={BLUE} />
+                ) : (
+                  <TouchableOpacity
+                    style={styles.livePill}
+                    activeOpacity={0.8}
+                    onPress={() => fetchCurrentLocation(true)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   >
-                    <View style={[styles.recentIcon, { backgroundColor: look.tint }]}>
-                      <Text style={styles.recentEmoji}>{look.emoji}</Text>
-                    </View>
-                    <View style={styles.flex}>
-                      <Text style={styles.recentTitle}>{look.title}</Text>
-                      <Text style={styles.recentSub}>{when}</Text>
-                    </View>
-                    <View style={styles.recentRight}>
-                      {r.fare != null && (
-                        <Text style={styles.amount}>₹{Number(r.fare).toFixed(0)}</Text>
-                      )}
-                      {!!statusText && (
-                        <View style={[styles.chip, { backgroundColor: tone.bg }]}>
-                          <Text style={[styles.chipText, { color: tone.fg }]}>
-                            {statusText}
-                          </Text>
-                        </View>
-                      )}
-                    </View>
-                  </View>
-                );
-              })}
+                    <Ionicons name="locate" size={14} color={BLUE} />
+                    <Text style={styles.livePillText}>Live</Text>
+                  </TouchableOpacity>
+                )}
+              </TouchableOpacity>
+
+              {/* Drop (big search bar) */}
+              <TouchableOpacity
+                style={styles.dropBar}
+                activeOpacity={0.8}
+                onPress={() => openPicker('drop')}
+              >
+                <View style={styles.dropSquare} />
+                <View style={styles.flex}>
+                  {drop ? (
+                    <>
+                      <Text style={styles.fieldLabel}>DROP</Text>
+                      <Text style={styles.fieldValue} numberOfLines={1}>
+                        {drop.address}
+                      </Text>
+                    </>
+                  ) : (
+                    <Text style={styles.dropPlaceholder}>Where to?</Text>
+                  )}
+                </View>
+
+                {drop ? (
+                  <TouchableOpacity
+                    style={styles.clearBtn}
+                    onPress={() => setDrop(null)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Ionicons name="close" size={16} color={GREY} />
+                  </TouchableOpacity>
+                ) : (
+                  <Ionicons name="search" size={20} color={GREY} />
+                )}
+              </TouchableOpacity>
             </View>
-          </>
-        )}
-      </ScrollView>
+
+            {/* Services */}
+            <Text style={styles.sectionTitle}>
+              {drop ? 'Choose a service for this trip' : 'Our services'}
+            </Text>
+            <View style={styles.servicesRow}>
+              {SERVICES.map((s) => (
+                <TouchableOpacity
+                  key={s.id}
+                  style={styles.serviceItem}
+                  activeOpacity={0.8}
+                  onPress={() => onServicePress(s.id)}
+                >
+                  <View style={[styles.serviceIcon, { backgroundColor: s.tint }]}>
+                    <Text style={styles.serviceEmoji}>{s.emoji}</Text>
+                  </View>
+                  <Text style={styles.serviceTitle}>{s.title}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Parcel promo (drop chunne se pehle) */}
+            {!drop && (
+              <View style={styles.promo}>
+                <View style={styles.promoCircleBig} />
+                <View style={styles.promoCircleSmall} />
+
+                <View style={styles.promoTextWrap}>
+                  <Text style={styles.promoTitle}>Send parcels in minutes</Text>
+                  <Text style={styles.promoSub}>
+                    Door-to-door delivery, person to person
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.promoBtn}
+                    activeOpacity={0.85}
+                    onPress={() => onServicePress('parcel')}
+                  >
+                    <Text style={styles.promoBtnText}>Send now</Text>
+                    <Ionicons name="arrow-forward" size={14} color={BLUE} />
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.promoEmoji}>📦</Text>
+              </View>
+            )}
+
+            {/* Why Raptor */}
+            <View style={styles.whyCard}>
+              {WHY_RAPTOR.map((w, i) => (
+                <View
+                  key={w.id}
+                  style={[styles.whyItem, i < WHY_RAPTOR.length - 1 && styles.whyDivider]}
+                >
+                  <View style={styles.whyIcon}>
+                    <Ionicons name={w.icon} size={20} color={BLUE} />
+                  </View>
+                  <Text style={styles.whyLabel}>{w.label}</Text>
+                </View>
+              ))}
+            </View>
+
+            {/* Recent activity: ride na ho to empty illustration */}
+            {recentLoaded && recentRides.length === 0 && (
+              <>
+                <View style={styles.sectionRow}>
+                  <Text style={styles.sectionTitleInline}>Recent Activity</Text>
+                </View>
+
+                <View style={styles.emptyCard}>
+                  {/* Illustration: soft circle + pin + taxi on a road */}
+                  <View style={styles.emptyArt}>
+                    <View style={styles.emptyCircle} />
+
+                    {/* clouds */}
+                    <View style={[styles.cloud, { top: 14, left: 10, width: 38 }]} />
+                    <View style={[styles.cloud, { top: 34, right: 6, width: 28 }]} />
+
+                    {/* floating location pin */}
+                    <View style={styles.pinWrap}>
+                      <View style={styles.pinHead}>
+                        <View style={styles.pinHole} />
+                      </View>
+                      <View style={styles.pinTip} />
+                      <View style={styles.pinShadow} />
+                    </View>
+
+                    {/* road + taxi */}
+                    <View style={styles.emptyRoad}>
+                      <View style={styles.roadDash} />
+                      <View style={styles.roadDash} />
+                      <View style={styles.roadDash} />
+                    </View>
+                    <Text style={styles.emptyTaxi}>🚕</Text>
+                  </View>
+
+                  <Text style={styles.emptyTitle}>No rides yet</Text>
+                  <Text style={styles.emptySub}>
+                    Aapki pehli ride ya delivery{'\n'}yaha dikhegi
+                  </Text>
+
+                  <TouchableOpacity
+                    style={styles.emptyBtn}
+                    activeOpacity={0.85}
+                    onPress={() => onServicePress('bike')}
+                  >
+                    <Text style={styles.emptyBtnText}>Book your first ride</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
+
+            {/* Recent activity: jab user ki rides ho */}
+            {recentRides.length > 0 && (
+              <>
+                <View style={styles.sectionRow}>
+                  <Text style={styles.sectionTitleInline}>Recent Activity</Text>
+                </View>
+
+                <View style={styles.recentCard}>
+                  {recentRides.map((r, i) => {
+                    const look = rideLook(r);
+                    const status = (r.status ?? '').toUpperCase();
+                    const statusText = STATUS_LABEL[status] ?? prettify(r.status);
+                    const when = timeAgo(r.completedAt ?? r.cancelledAt ?? r.createdAt);
+                    const tone = statusTone(status);
+                    const active = isActiveRide(r);
+                    const completed = status === 'COMPLETED' || status === 'DELIVERED';
+                    const tappable = active || completed; // cancelled par tap nahi
+
+                    return (
+                      <TouchableOpacity
+                        key={r.id}
+                        activeOpacity={tappable ? 0.7 : 1}
+                        disabled={!tappable}
+                        onPress={() => navigation.navigate('RideTracking', { rideId: r.id })}
+                        style={[
+                          styles.recentRow,
+                          i === recentRides.length - 1 && styles.noBorder,
+                        ]}
+                      >
+                        <View style={[styles.recentIcon, { backgroundColor: look.tint }]}>
+                          <Text style={styles.recentEmoji}>{look.emoji}</Text>
+                        </View>
+                        <View style={styles.flex}>
+                          <Text style={styles.recentTitle}>{look.title}</Text>
+                          <Text style={styles.recentSub}>{active ? 'Tap to track' : completed ? `${when} • View bill` : when}</Text>
+                        </View>
+                        <View style={styles.recentRight}>
+                          {r.fare != null && (
+                            <Text style={styles.amount}>₹{Number(r.fare).toFixed(0)}</Text>
+                          )}
+                          {!!statusText && (
+                            <View style={[styles.chip, { backgroundColor: tone.bg }]}>
+                              <Text style={[styles.chipText, { color: tone.fg }]}>
+                                {statusText}
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
+          </ScrollView>
+        </Animated.View>
+      </View>
 
       {/* Pickup / Drop search */}
       <LocationPicker
@@ -608,14 +874,96 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: BG },
   scroll: { paddingHorizontal: 16, paddingBottom: 32 },
 
-  // top bar
+  // map
+  mapWrap: { position: 'absolute', left: 0, right: 0, top: 0 },
+
+  // fixed center pin (dot ka center = map ka exact center)
+  centerPin: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  centerPinLifted: { transform: [{ translateY: -10 }] },
+  mapPinLabel: {
+    backgroundColor: GREEN_DARK,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+  },
+  mapPinLabelText: { color: '#fff', fontSize: 13, fontWeight: '800' },
+  mapPinStem: { width: 2, height: 10, backgroundColor: GREEN_DARK },
+  mapPinDotOuter: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 3,
+  },
+  mapPinDotInner: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: GREEN_DARK,
+  },
+  recenter: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 4,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+    shadowColor: BLACK,
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+
+  // bottom sheet
+  sheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: BG,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    elevation: 12,
+    shadowColor: BLACK,
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -3 },
+  },
+
+  handle: {
+    alignSelf: 'center',
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#CBD5E1',
+    marginTop: 8,
+    marginBottom: 10,
+  },
+
+  // top bar (map ke upar)
   topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 16,
+    right: 16,
+    zIndex: 5,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingTop: 10,
-    paddingBottom: 14,
   },
+  logo: { width: 150, height: 54, marginLeft: -34 },
   bell: {
     width: 42,
     height: 42,
@@ -734,7 +1082,6 @@ const styles = StyleSheet.create({
   serviceEmoji: { fontSize: 30 },
   serviceTitle: { fontSize: 13, fontWeight: '700', color: BLACK, marginTop: 8 },
 
-logo: { width: 150, height: 54, marginLeft: -34 },
   // promo banner
   promo: {
     backgroundColor: BLUE,

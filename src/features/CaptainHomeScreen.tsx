@@ -6,7 +6,6 @@ import {
   ScrollView,
   Switch,
   StatusBar,
-  RefreshControl,
   TouchableOpacity,
   ActivityIndicator,
   Modal,
@@ -17,21 +16,22 @@ import {
   Animated,
   Easing,
   Image,
+  PanResponder,
+  Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused, useNavigation } from '@react-navigation/native';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 
-// Map for picking a location (npm i react-native-maps)
-import MapView, { Marker } from 'react-native-maps';
+// Map for the home screen + picking a location (npm i react-native-maps)
+import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 
 // GPS: npm i @react-native-community/geolocation
 import Geolocation from '@react-native-community/geolocation';
 
-// Pick QR from gallery: npm i react-native-image-picker @react-native-async-storage/async-storage
-import { launchImageLibrary } from 'react-native-image-picker';
+// Dismissed summary popups are remembered on the phone
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
+import { useHideTabBarOnScroll } from '../components/AppTabBar';
 // Your axios instance / api helper (with token header)
 import api from '../services/CaptainaRideApi';
 
@@ -44,9 +44,14 @@ import CaptainRideCard, {
   CaptainRideStatus,
   RideCategory,
   CATEGORY_LABEL,
-  NEXT_ACTION,
   prettyLabel,
 } from '../components/CaptainRideCard'; // adjust path to your folder
+
+// Payment + details + rating popup after a ride (separate file)
+import RideSummaryModal, {
+  SUMMARY_WINDOW_MS,
+  DISMISSED_KEY,
+} from '../components/RideSummaryModal'; // adjust path to your folder
 
 const BLUE = '#1F6FE5';
 const BLUE_DARK = '#1553B3';
@@ -56,13 +61,21 @@ const BLACK = '#0F172A';
 const GREY = '#64748B';
 const BORDER = '#E2E8F0';
 const GREEN = '#16A34A';
+const GREEN_LIGHT = '#DCFCE7';
 const RED = '#DC2626';
 
 // While online, the live location is pushed to the backend every N ms
 const LOCATION_PUSH_MS = 10000;
 
-// If the captain is farther than this (meters) from the drop, show a warning on complete
-const DROP_NEAR_METERS = 300;
+// ---------- Home map + bottom sheet (Rapido style) ----------
+const SCREEN_H = Dimensions.get('window').height;
+const SNAP_TOP = SCREEN_H * 0.22; // default: map chhota (upar ki patti), sheet bada
+const SNAP_HALF = SCREEN_H * 0.5; // neeche kheencho: map aadha
+const MAP_H = SNAP_HALF + 40; // map ki fixed height (sheet ke peeche tak)
+const MAP_ZOOM = 0.006; // chhota number = zyada zoom
+
+// Location na mile to map yaha dikhega (Bhopal)
+const FALLBACK_CENTER = { latitude: 23.2599, longitude: 77.4126 };
 
 type Coords = { latitude: number; longitude: number };
 
@@ -136,34 +149,6 @@ const startOfWeek = (d: Date) => {
 const getErrorMessage = (e: any, fallback: string) => {
   const msg = e?.response?.data?.message;
   return Array.isArray(msg) ? msg.join('\n') : msg || e?.message || fallback;
-};
-
-// Distance between two coordinates (meters)
-const distanceM = (a: Coords, b: Coords) => {
-  const R = 6371000;
-  const toRad = (x: number) => (x * Math.PI) / 180;
-  const dLat = toRad(b.latitude - a.latitude);
-  const dLng = toRad(b.longitude - a.longitude);
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(a.latitude)) *
-      Math.cos(toRad(b.latitude)) *
-      Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
-};
-
-// Before completing a ride, confirm the captain reached the drop location.
-// far = current distance from drop (meters); if known, a warning is shown
-const confirmComplete = (onYes: () => void, far?: number | null) => {
-  const message =
-    far != null && far > DROP_NEAR_METERS
-      ? `You are about ${Math.round(far)} m away from the drop location.\nDo you still want to complete the ride?`
-      : "Have you reached the customer's drop location?";
-
-  Alert.alert('Drop location check', message, [
-    { text: 'No', style: 'cancel' },
-    { text: 'Yes, Complete', onPress: onYes },
-  ]);
 };
 
 // ---------- GPS helpers ----------
@@ -249,731 +234,6 @@ const getOnlineErrorMessage = (e: any) => {
   return e?.message || 'Something went wrong, please try again';
 };
 
-// ================= RIDE SUMMARY (payment + details + rating) =================
-// After a ride completes, a popup opens here:
-// payment (Cash / Use my own QR) -> success tick + full details -> rating
-
-// The summary popup opens automatically only within this time after completion
-const SUMMARY_WINDOW_MS = 10 * 60 * 1000;
-
-// IDs of rides whose popup was closed (or payment + rating done), saved on the phone
-const DISMISSED_KEY = 'captain_dismissed_summaries';
-
-// Captain's UPI QR saved on the phone (picked from gallery)
-const QR_STORAGE_KEY = 'captain_upi_qr_uri';
-
-const GREEN_LIGHT = '#DCFCE7';
-const GOLD = '#F59E0B';
-
-type PayMethod = 'CASH' | 'UPI';
-
-type RideDetail = {
-  id: string;
-  status: string;
-  earning: number | null;
-  acceptedAt: string | null;
-  startedAt: string | null;
-  completedAt: string | null;
-  ride: Record<string, any>;
-};
-
-const RATING_TEXT: Record<number, string> = {
-  1: 'Very bad',
-  2: 'Poor',
-  3: 'Okay',
-  4: 'Good',
-  5: 'Excellent',
-};
-
-const formatTime = (iso?: string | null) => {
-  if (!iso) return '-';
-  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-};
-
-const formatDate = (iso?: string | null) => {
-  if (!iso) return '-';
-  return new Date(iso).toLocaleDateString([], {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  });
-};
-
-const tripMinutes = (start?: string | null, end?: string | null) => {
-  if (!start || !end) return null;
-  const ms = new Date(end).getTime() - new Date(start).getTime();
-  if (Number.isNaN(ms) || ms < 0) return null;
-  return Math.max(1, Math.round(ms / 60000));
-};
-
-// One "label : value" line
-const InfoRow = ({ label, value }: { label: string; value: string }) => (
-  <View style={sm.infoRow}>
-    <Text style={sm.infoLabel}>{label}</Text>
-    <Text style={sm.infoValue} numberOfLines={2}>
-      {value}
-    </Text>
-  </View>
-);
-
-function RideSummaryModal({
-  captainRideId,
-  onClose,
-}: {
-  captainRideId: string;
-  onClose: () => void;
-}) {
-  const [data, setData] = useState<RideDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [captainName, setCaptainName] = useState('');
-
-  // payment
-  const [qrMode, setQrMode] = useState(false);
-  const [qrUri, setQrUri] = useState<string | null>(null);
-  const [paying, setPaying] = useState(false);
-
-  // rating
-  const [rating, setRating] = useState(0);
-  const [comment, setComment] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [ratedLocal, setRatedLocal] = useState(false);
-
-  // tick animation
-  const tickScale = useRef(new Animated.Value(0)).current;
-
-  const ride = data?.ride ?? {};
-  const fare = Number(ride.fare ?? data?.earning ?? 0).toFixed(0);
-
-  const paid = !!ride.paidAt;
-  const paidMethod: PayMethod | null = ride.paymentMethod ?? null;
-  const rated = ratedLocal || ride.userRating != null;
-
-  // Load the saved QR
-  useEffect(() => {
-    AsyncStorage.getItem(QR_STORAGE_KEY)
-      .then((v) => v && setQrUri(v))
-      .catch(() => {});
-  }, []);
-
-  // Captain's own name (if the backend returns it from /captains/me)
-  useEffect(() => {
-    api
-      .get('/captains/me')
-      .then((res) => {
-        const d: any = res.data;
-        setCaptainName(d?.name ?? d?.user?.name ?? d?.fullName ?? '');
-      })
-      .catch(() => {});
-  }, []);
-
-  const fetchDetail = useCallback(async () => {
-    try {
-      const res = await api.get<RideDetail>(`/captain-rides/${captainRideId}`);
-      setData(res.data);
-    } catch (e: any) {
-      console.log('summary fetch error', e?.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [captainRideId]);
-
-  useEffect(() => {
-    fetchDetail();
-  }, [fetchDetail]);
-
-  // Tick animation as soon as payment is done
-  useEffect(() => {
-    if (!paid) return;
-    tickScale.setValue(0);
-    Animated.spring(tickScale, {
-      toValue: 1,
-      friction: 5,
-      tension: 80,
-      useNativeDriver: true,
-    }).start();
-  }, [paid, tickScale]);
-
-  // ---------- QR from gallery ----------
-  const pickQr = async () => {
-    try {
-      const res = await launchImageLibrary({ mediaType: 'photo', selectionLimit: 1 });
-      if (res.didCancel) return;
-
-      if (res.errorCode) {
-        Alert.alert('Gallery', res.errorMessage || 'Could not open the gallery');
-        return;
-      }
-
-      const uri = res.assets?.[0]?.uri;
-      if (!uri) return;
-
-      setQrUri(uri);
-      await AsyncStorage.setItem(QR_STORAGE_KEY, uri);
-    } catch (e: any) {
-      Alert.alert('Gallery', e?.message || 'Could not select the QR');
-    }
-  };
-
-  // ---------- save payment ----------
-  const savePayment = async (method: PayMethod) => {
-    try {
-      setPaying(true);
-      await api.patch(`/captain-rides/${captainRideId}/payment`, { method });
-      await fetchDetail();
-    } catch (e: any) {
-      Alert.alert('Payment not saved', getErrorMessage(e, 'Please try again'));
-    } finally {
-      setPaying(false);
-    }
-  };
-
-  const onCashPress = () => {
-    if (paying) return;
-    Alert.alert('Cash payment', `Did you receive ₹${fare} in cash?`, [
-      { text: 'No', style: 'cancel' },
-      { text: 'Yes, received', onPress: () => savePayment('CASH') },
-    ]);
-  };
-
-  const onQrReceived = () => {
-    if (paying) return;
-    Alert.alert('UPI payment', `Did the customer pay ₹${fare} via UPI?`, [
-      { text: 'No', style: 'cancel' },
-      { text: 'Yes, received', onPress: () => savePayment('UPI') },
-    ]);
-  };
-
-  // ---------- rating ----------
-  const submitRating = async () => {
-    if (rating < 1) {
-      Alert.alert('Rating required', 'Please rate the customer from 1 to 5 stars');
-      return;
-    }
-
-    try {
-      setSubmitting(true);
-      await api.post(`/captain-rides/${captainRideId}/rate`, {
-        rating,
-        ...(comment.trim() ? { comment: comment.trim() } : {}),
-      });
-      setRatedLocal(true);
-      Alert.alert('Thank you', 'Your rating has been saved');
-      onClose();
-    } catch (e: any) {
-      Alert.alert('Rating not saved', getErrorMessage(e, 'Please try again'));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const skipRating = () => {
-    Alert.alert('Skip rating?', 'You are leaving without rating the customer.', [
-      { text: 'I will rate', style: 'cancel' },
-      { text: 'Skip', style: 'destructive', onPress: onClose },
-    ]);
-  };
-
-  // ---------- UI ----------
-  const mins = tripMinutes(data?.startedAt, data?.completedAt);
-  const customerName =
-    ride.user?.name ?? ride.userName ?? ride.passengerName ?? ride.riderName;
-  const customerPhone =
-    ride.user?.phone ?? ride.userPhone ?? ride.passengerPhone ?? ride.riderPhone;
-  const isParcelLike = ride.category === 'PARCEL' || ride.category === 'GOODS';
-  const categoryLabel =
-    (CATEGORY_LABEL as Record<string, string>)[ride.category] ?? '-';
-
-  return (
-    // Android back does not close the popup (before payment / rating)
-    <Modal visible animationType="slide" onRequestClose={() => {}}>
-      <SafeAreaView style={sm.container} edges={['top', 'bottom']}>
-        {loading ? (
-          <View style={sm.center}>
-            <ActivityIndicator size="large" color={BLUE} />
-          </View>
-        ) : !data ? (
-          <View style={sm.center}>
-            <Text style={sm.muted}>Could not load ride details</Text>
-            <TouchableOpacity style={sm.retryBtn} onPress={fetchDetail}>
-              <Text style={sm.retryText}>Try again</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={sm.skipBtn} onPress={onClose}>
-              <Text style={sm.skipText}>Go back</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <ScrollView
-            contentContainerStyle={sm.scroll}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
-            {!paid ? (
-              <>
-                {/* ============ PAYMENT ============ */}
-                <TouchableOpacity style={sm.closeLink} onPress={onClose}>
-                  <Text style={sm.closeText}>✕ Later</Text>
-                </TouchableOpacity>
-                <Text style={sm.done}>Ride completed</Text>
-                <Text style={sm.doneSub}>Collect the payment from the customer</Text>
-
-                <View style={sm.amountCard}>
-                  <Text style={sm.amountLabel}>Total fare</Text>
-                  <Text style={sm.amountValue}>₹ {fare}</Text>
-                  <Text style={sm.amountSub}>
-                    {ride.distance != null ? `${Number(ride.distance).toFixed(1)} km` : ''}
-                    {ride.distance != null && mins != null ? '  •  ' : ''}
-                    {mins != null ? `${mins} min` : ''}
-                  </Text>
-                </View>
-
-                {!qrMode ? (
-                  <View style={sm.card}>
-                    <Text style={sm.cardTitle}>How was the payment received?</Text>
-
-                    <TouchableOpacity
-                      style={[sm.payBtn, paying && sm.btnDisabled]}
-                      activeOpacity={0.85}
-                      disabled={paying}
-                      onPress={onCashPress}
-                    >
-                      {paying ? (
-                        <ActivityIndicator color={BLUE} />
-                      ) : (
-                        <>
-                          <Text style={sm.payEmoji}>💵</Text>
-                          <View style={styles.flex}>
-                            <Text style={sm.payTitle}>Cash</Text>
-                            <Text style={sm.paySub}>Customer paid in cash</Text>
-                          </View>
-                          <Text style={sm.payArrow}>›</Text>
-                        </>
-                      )}
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={sm.payBtn}
-                      activeOpacity={0.85}
-                      disabled={paying}
-                      onPress={() => setQrMode(true)}
-                    >
-                      <Text style={sm.payEmoji}>📲</Text>
-                      <View style={styles.flex}>
-                        <Text style={sm.payTitle}>Use my own QR</Text>
-                        <Text style={sm.paySub}>
-                          Show your UPI QR for the customer to scan
-                        </Text>
-                      </View>
-                      <Text style={sm.payArrow}>›</Text>
-                    </TouchableOpacity>
-                  </View>
-                ) : (
-                  <View style={sm.card}>
-                    <View style={sm.rowBetween}>
-                      <Text style={sm.cardTitle}>Your UPI QR</Text>
-                      <TouchableOpacity onPress={() => setQrMode(false)}>
-                        <Text style={sm.link}>← Back</Text>
-                      </TouchableOpacity>
-                    </View>
-
-                    <View style={sm.qrBox}>
-                      {qrUri ? (
-                        <>
-                          <Image
-                            source={{ uri: qrUri }}
-                            style={sm.qrImage}
-                            resizeMode="contain"
-                          />
-                          <Text style={sm.qrHint}>
-                            Customer can scan this QR to pay ₹{fare}
-                          </Text>
-                          <TouchableOpacity onPress={pickQr}>
-                            <Text style={sm.link}>Change QR</Text>
-                          </TouchableOpacity>
-                        </>
-                      ) : (
-                        <>
-                          <Text style={sm.qrEmpty}>
-                            No QR added yet.{'\n'}Choose your UPI QR from the gallery.
-                          </Text>
-                          <TouchableOpacity style={sm.qrAddBtn} onPress={pickQr}>
-                            <Text style={sm.qrAddText}>Add QR from gallery</Text>
-                          </TouchableOpacity>
-                        </>
-                      )}
-                    </View>
-
-                    <TouchableOpacity
-                      style={[styles.primaryBtn, paying && sm.btnDisabled]}
-                      disabled={paying}
-                      onPress={onQrReceived}
-                    >
-                      {paying ? (
-                        <ActivityIndicator color="#fff" />
-                      ) : (
-                        <Text style={styles.primaryBtnText}>Payment received</Text>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                )}
-              </>
-            ) : (
-              <>
-                {/* ============ SUCCESS TICK ============ */}
-                <View style={sm.successWrap}>
-                  <Animated.View
-                    style={[sm.tickCircle, { transform: [{ scale: tickScale }] }]}
-                  >
-                    <Text style={sm.tick}>✓</Text>
-                  </Animated.View>
-                  <Text style={sm.successTitle}>Payment Successful</Text>
-                  <Text style={sm.successAmount}>₹ {fare}</Text>
-                  <Text style={sm.successSub}>
-                    Received via {paidMethod === 'CASH' ? 'Cash' : 'UPI QR'}
-                  </Text>
-                </View>
-
-                {/* ============ FULL DETAILS ============ */}
-                <View style={sm.card}>
-                  <Text style={sm.cardTitle}>Ride details</Text>
-
-                  <View style={sm.infoBlock}>
-                    <InfoRow
-                      label="Ride ID"
-                      value={`#${String(ride.id ?? data.id).slice(0, 8).toUpperCase()}`}
-                    />
-                    <InfoRow label="Date" value={formatDate(data.completedAt)} />
-                    <InfoRow label="Type" value={categoryLabel} />
-                    <InfoRow label="Vehicle" value={prettyLabel(ride.vehicleType) || '-'} />
-                  </View>
-
-                  <View style={sm.placeRow}>
-                    <View style={[styles.dot, { backgroundColor: GREEN }]} />
-                    <View style={styles.flex}>
-                      <Text style={styles.placeLabel}>Pickup</Text>
-                      <Text style={styles.placeText}>{ride.pickupAddress || '—'}</Text>
-                    </View>
-                  </View>
-                  <View style={sm.placeRow}>
-                    <View style={[styles.dot, { backgroundColor: RED }]} />
-                    <View style={styles.flex}>
-                      <Text style={styles.placeLabel}>Drop</Text>
-                      <Text style={styles.placeText}>{ride.dropAddress || '—'}</Text>
-                    </View>
-                  </View>
-
-                  <View style={sm.statsRow}>
-                    <View style={sm.stat}>
-                      <Text style={sm.statValue}>
-                        {ride.distance != null
-                          ? `${Number(ride.distance).toFixed(1)} km`
-                          : '-'}
-                      </Text>
-                      <Text style={sm.statLabel}>Distance</Text>
-                    </View>
-                    <View style={sm.stat}>
-                      <Text style={sm.statValue}>{mins != null ? `${mins} min` : '-'}</Text>
-                      <Text style={sm.statLabel}>Duration</Text>
-                    </View>
-                    <View style={sm.stat}>
-                      <Text style={sm.statValue}>₹ {fare}</Text>
-                      <Text style={sm.statLabel}>Fare</Text>
-                    </View>
-                  </View>
-
-                  <View style={sm.infoBlock}>
-                    <InfoRow label="Ride accepted" value={formatTime(data.acceptedAt)} />
-                    <InfoRow label="Ride started" value={formatTime(data.startedAt)} />
-                    <InfoRow label="Ride completed" value={formatTime(data.completedAt)} />
-                  </View>
-                </View>
-
-                <View style={sm.card}>
-                  <Text style={sm.cardTitle}>Customer</Text>
-                  <View style={sm.infoBlock}>
-                    <InfoRow label="Name" value={customerName || '-'} />
-                    <InfoRow label="Phone" value={customerPhone || '-'} />
-                  </View>
-
-                  {isParcelLike && (
-                    <View style={sm.infoBlock}>
-                      {!!ride.senderName && (
-                        <InfoRow label="Sender" value={ride.senderName} />
-                      )}
-                      <InfoRow label="Receiver" value={ride.receiverName || '-'} />
-                      {!!ride.receiverPhone && (
-                        <InfoRow label="Receiver phone" value={ride.receiverPhone} />
-                      )}
-                      {!!ride.parcelDescription && (
-                        <InfoRow label="Package" value={ride.parcelDescription} />
-                      )}
-                      {!!ride.parcelSize && (
-                        <InfoRow label="Size" value={prettyLabel(ride.parcelSize)} />
-                      )}
-                    </View>
-                  )}
-                </View>
-
-                <View style={sm.card}>
-                  <Text style={sm.cardTitle}>Captain (you)</Text>
-                  <View style={sm.infoBlock}>
-                    {!!captainName && <InfoRow label="Name" value={captainName} />}
-                    <InfoRow
-                      label="Earning"
-                      value={`₹ ${Number(data.earning ?? ride.fare ?? 0).toFixed(0)}`}
-                    />
-                    <InfoRow
-                      label="Payment"
-                      value={`${paidMethod === 'CASH' ? 'Cash' : 'UPI QR'}  •  ${formatTime(ride.paidAt)}`}
-                    />
-                    <InfoRow label="Status" value="Paid" />
-                  </View>
-                </View>
-
-                {/* ============ RATING ============ */}
-                {!rated ? (
-                  <View style={sm.card}>
-                    <Text style={sm.cardTitle}>Rate the customer</Text>
-
-                    <View style={sm.starsRow}>
-                      {[1, 2, 3, 4, 5].map((n) => (
-                        <TouchableOpacity
-                          key={n}
-                          onPress={() => setRating(n)}
-                          activeOpacity={0.7}
-                        >
-                          <Text
-                            style={[sm.star, { color: n <= rating ? GOLD : '#CBD5E1' }]}
-                          >
-                            ★
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                    {rating > 0 && <Text style={sm.ratingText}>{RATING_TEXT[rating]}</Text>}
-
-                    <TextInput
-                      style={sm.input}
-                      placeholder="Write a comment (optional)"
-                      placeholderTextColor={GREY}
-                      value={comment}
-                      onChangeText={setComment}
-                      multiline
-                      maxLength={300}
-                    />
-
-                    <TouchableOpacity
-                      style={[
-                        styles.primaryBtn,
-                        (rating < 1 || submitting) && sm.btnDisabled,
-                      ]}
-                      disabled={rating < 1 || submitting}
-                      onPress={submitRating}
-                    >
-                      {submitting ? (
-                        <ActivityIndicator color="#fff" />
-                      ) : (
-                        <Text style={styles.primaryBtnText}>Submit rating</Text>
-                      )}
-                    </TouchableOpacity>
-
-                    <TouchableOpacity style={sm.skipBtn} onPress={skipRating}>
-                      <Text style={sm.skipText}>Skip</Text>
-                    </TouchableOpacity>
-                  </View>
-                ) : (
-                  <>
-                    <View style={sm.ratedBox}>
-                      <Text style={sm.ratedText}>Rating submitted</Text>
-                    </View>
-                    <TouchableOpacity style={styles.primaryBtn} onPress={onClose}>
-                      <Text style={styles.primaryBtnText}>Done</Text>
-                    </TouchableOpacity>
-                  </>
-                )}
-              </>
-            )}
-          </ScrollView>
-        )}
-      </SafeAreaView>
-    </Modal>
-  );
-}
-
-const sm = StyleSheet.create({
-  container: { flex: 1, backgroundColor: BG },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  scroll: { padding: 16, paddingBottom: 32 },
-  muted: { fontSize: 13, color: GREY },
-  btnDisabled: { opacity: 0.5 },
-
-  closeLink: { alignSelf: 'flex-end', paddingVertical: 6, paddingHorizontal: 4 },
-  closeText: { color: GREY, fontSize: 13, fontWeight: '700' },
-  done: { fontSize: 24, fontWeight: '800', color: BLACK, marginTop: 2 },
-  doneSub: { fontSize: 14, color: GREY, marginTop: 2, marginBottom: 14 },
-
-  retryBtn: {
-    marginTop: 12,
-    backgroundColor: BLUE_LIGHT,
-    borderRadius: 12,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-  },
-  retryText: { color: BLUE, fontWeight: '800' },
-
-  amountCard: {
-    backgroundColor: BLUE,
-    borderRadius: 20,
-    padding: 20,
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-  amountLabel: { color: '#DCE8FF', fontSize: 13 },
-  amountValue: { color: '#fff', fontSize: 42, fontWeight: '800', marginTop: 2 },
-  amountSub: { color: '#DCE8FF', fontSize: 13, marginTop: 4 },
-
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 14,
-  },
-  cardTitle: { fontSize: 16, fontWeight: '800', color: BLACK },
-  rowBetween: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-
-  payBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: BORDER,
-    borderRadius: 16,
-    padding: 14,
-    marginTop: 12,
-    minHeight: 64,
-  },
-  payEmoji: { fontSize: 28, marginRight: 12 },
-  payTitle: { fontSize: 15, fontWeight: '800', color: BLACK },
-  paySub: { fontSize: 12, color: GREY, marginTop: 2 },
-  payArrow: { fontSize: 26, color: GREY, marginLeft: 8 },
-
-  qrBox: {
-    alignItems: 'center',
-    backgroundColor: BG,
-    borderRadius: 14,
-    padding: 14,
-    marginVertical: 12,
-  },
-  qrImage: { width: 240, height: 240, borderRadius: 12, backgroundColor: '#fff' },
-  qrHint: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: BLACK,
-    marginTop: 10,
-    textAlign: 'center',
-  },
-  qrEmpty: { fontSize: 13, color: GREY, textAlign: 'center', lineHeight: 19 },
-  qrAddBtn: {
-    backgroundColor: BLUE_LIGHT,
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    marginTop: 12,
-  },
-  qrAddText: { color: BLUE, fontWeight: '800', fontSize: 13 },
-  link: { color: BLUE, fontWeight: '700', fontSize: 13, marginTop: 8 },
-
-  successWrap: {
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 18,
-    paddingVertical: 24,
-    marginBottom: 14,
-  },
-  tickCircle: {
-    width: 84,
-    height: 84,
-    borderRadius: 42,
-    backgroundColor: GREEN,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tick: { color: '#fff', fontSize: 48, fontWeight: '800', marginTop: -4 },
-  successTitle: { fontSize: 20, fontWeight: '800', color: GREEN, marginTop: 14 },
-  successAmount: { fontSize: 34, fontWeight: '800', color: BLACK, marginTop: 4 },
-  successSub: { fontSize: 14, color: GREY, marginTop: 4 },
-
-  infoBlock: {
-    backgroundColor: BG,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    marginTop: 12,
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    paddingVertical: 7,
-  },
-  infoLabel: { fontSize: 13, color: GREY, marginRight: 12 },
-  infoValue: {
-    flex: 1,
-    textAlign: 'right',
-    fontSize: 13,
-    fontWeight: '700',
-    color: BLACK,
-  },
-
-  placeRow: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 14 },
-
-  statsRow: {
-    flexDirection: 'row',
-    borderTopWidth: 1,
-    borderTopColor: BORDER,
-    paddingTop: 12,
-    marginTop: 14,
-  },
-  stat: { flex: 1, alignItems: 'center' },
-  statValue: { fontSize: 15, fontWeight: '800', color: BLACK },
-  statLabel: { fontSize: 12, color: GREY, marginTop: 2 },
-
-  starsRow: { flexDirection: 'row', justifyContent: 'center', marginTop: 12 },
-  star: { fontSize: 42, marginHorizontal: 4 },
-  ratingText: {
-    textAlign: 'center',
-    fontSize: 14,
-    fontWeight: '700',
-    color: BLACK,
-    marginTop: 4,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 12,
-    padding: 12,
-    minHeight: 70,
-    textAlignVertical: 'top',
-    color: BLACK,
-    marginTop: 14,
-    marginBottom: 14,
-  },
-  ratedBox: {
-    backgroundColor: GREEN_LIGHT,
-    borderRadius: 12,
-    padding: 12,
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-  ratedText: { color: GREEN, fontWeight: '800', fontSize: 14 },
-
-  skipBtn: { paddingVertical: 12, alignItems: 'center', marginTop: 4 },
-  skipText: { color: GREY, fontSize: 14, fontWeight: '700' },
-});
-
 // Emoji + tint for a request card (category / vehicle based)
 const vehicleLook = (category?: string | null, vehicleType?: string | null) => {
   const cat = (category ?? '').toUpperCase();
@@ -988,6 +248,55 @@ const vehicleLook = (category?: string | null, vehicleType?: string | null) => {
     return { emoji: '🛺', tint: '#FFF3C4' };
   }
   return { emoji: '🚕', tint: '#FFF3C4' };
+};
+
+// ---------- Recent activity helpers ----------
+// Home pe kitni rides dikhani hain
+const RECENT_LIMIT = 3;
+
+// Title of a ride row (category / vehicle based)
+const rideTitle = (category?: string | null, vehicleType?: string | null) => {
+  const cat = (category ?? '').toUpperCase();
+  const veh = (vehicleType ?? '').toUpperCase();
+
+  if (cat === 'PARCEL') return 'Parcel Delivery';
+  if (cat === 'GOODS') return 'Goods Delivery';
+  if (veh.includes('BIKE') || veh.includes('SCOOTY') || veh === 'LITE') return 'Bike Ride';
+  if (veh.includes('AUTO') || veh.includes('RICKSHAW')) return 'Auto Ride';
+  return 'Cab Ride';
+};
+
+const RECENT_STATUS_LABEL: Record<string, string> = {
+  COMPLETED: 'Completed',
+  CANCELLED: 'Cancelled',
+  STARTED: 'On the way',
+  ARRIVED: 'Arrived',
+  ARRIVING: 'Arriving',
+  ACCEPTED: 'Accepted',
+  ASSIGNED: 'Assigned',
+};
+
+// status chip ka rang
+const recentTone = (status: string) => {
+  if (status === 'COMPLETED') return { bg: GREEN_LIGHT, fg: GREEN };
+  if (status === 'CANCELLED') return { bg: '#FEE2E2', fg: RED };
+  return { bg: BLUE_LIGHT, fg: BLUE };
+};
+
+// "Today" / "Yesterday" / "3 days ago" / "12 Oct"
+const timeAgo = (iso?: string | null) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+
+  const startOf = (x: Date) =>
+    new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOf(new Date()) - startOf(d)) / 86400000);
+
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days < 7) return `${days} days ago`;
+  return d.toLocaleDateString([], { day: '2-digit', month: 'short' });
 };
 
 // Online + waiting: two pulsing rings around a center icon
@@ -1038,6 +347,8 @@ function RadarPulse() {
 
 export default function CaptainHomeScreen() {
   const navigation = useNavigation<any>();
+  const isFocused = useIsFocused();
+  const hideTabBar = useHideTabBarOnScroll();
 
   // Synced with backend (PATCH /captains/me/online)
   const [online, setOnline] = useState(false);
@@ -1049,21 +360,11 @@ export default function CaptainHomeScreen() {
 
   const [rides, setRides] = useState<CaptainRide[]>([]);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [updating, setUpdating] = useState(false);
 
   // new requests
   const [availableRides, setAvailableRides] = useState<AvailableRide[]>([]);
   const [availableError, setAvailableError] = useState('');
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
-
-  // cancel modal
-  const [cancelVisible, setCancelVisible] = useState(false);
-  const [cancelReason, setCancelReason] = useState('');
-
-  // start-ride OTP modal (customer tells the 4 digit OTP)
-  const [otpVisible, setOtpVisible] = useState(false);
-  const [otpValue, setOtpValue] = useState('');
 
   // prevent overlapping location pushes
   const pushingLocation = useRef(false);
@@ -1078,7 +379,7 @@ export default function CaptainHomeScreen() {
   // If a manual location is chosen, it is sent every 10 sec instead of GPS
   const manualRef = useRef<Coords | null>(null);
 
-  // Map modal
+  // Map modal (change location)
   const [mapVisible, setMapVisible] = useState(false);
   const [pickedCoords, setPickedCoords] = useState<Coords | null>(null);
   const [savingLocation, setSavingLocation] = useState(false);
@@ -1087,6 +388,120 @@ export default function CaptainHomeScreen() {
   // Place search inside the map modal
   const [searchText, setSearchText] = useState('');
   const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
+
+  // ---------- Home map + bottom sheet ----------
+  const homeMapRef = useRef<MapView>(null);
+  // phone GPS ek baar (offline hone par bhi map ko live location dikhane ke liye)
+  const [gpsOnce, setGpsOnce] = useState<Coords | null>(null);
+  const [mapExpanded, setMapExpanded] = useState(false); // true = map aadha
+
+  const sheetTop = useRef(new Animated.Value(SNAP_TOP)).current;
+  const sheetTopVal = useRef(SNAP_TOP); // sheetTop ki current number value
+  const dragStart = useRef(SNAP_TOP);
+  const scrollY = useRef(0); // sheet ke andar ki list kitni scroll hui
+
+  // map kahan dikhana hai: online location > phone GPS > Bhopal
+  const mapCenter: Coords = myLocation ?? gpsOnce ?? FALLBACK_CENTER;
+
+  useEffect(() => {
+    const id = sheetTop.addListener(({ value }) => {
+      sheetTopVal.current = value;
+    });
+    return () => sheetTop.removeListener(id);
+  }, [sheetTop]);
+
+  const snapTo = (half: boolean) => {
+    setMapExpanded(half);
+    Animated.spring(sheetTop, {
+      toValue: half ? SNAP_HALF : SNAP_TOP,
+      useNativeDriver: false,
+      speed: 14,
+      bounciness: 4,
+    }).start();
+  };
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponderCapture: (_, g) => {
+        // sirf vertical drag
+        if (Math.abs(g.dy) < 8 || Math.abs(g.dy) < Math.abs(g.dx)) return false;
+
+        const down = g.dy > 0;
+        const atTop = sheetTopVal.current <= SNAP_TOP + 2;
+        const atHalf = sheetTopVal.current >= SNAP_HALF - 2;
+
+        // list sabse upar + neeche kheencha -> map badhao
+        if (down && scrollY.current <= 0 && !atHalf) return true;
+        // map aadha hai + upar kheencha -> map wapas chhota
+        if (!down && !atTop) return true;
+        // baaki sab: normal scroll
+        return false;
+      },
+      onPanResponderGrant: () => {
+        sheetTop.stopAnimation();
+        dragStart.current = sheetTopVal.current;
+      },
+      onPanResponderMove: (_, g) => {
+        sheetTop.setValue(
+          Math.min(SNAP_HALF, Math.max(SNAP_TOP, dragStart.current + g.dy)),
+        );
+      },
+      onPanResponderRelease: (_, g) => {
+        const mid = (SNAP_TOP + SNAP_HALF) / 2;
+        const half =
+          g.vy > 0.4 ? true : g.vy < -0.4 ? false : sheetTopVal.current > mid;
+        snapTo(half);
+      },
+      onPanResponderTerminate: () => {
+        snapTo(sheetTopVal.current > (SNAP_TOP + SNAP_HALF) / 2);
+      },
+    }),
+  ).current;
+
+  // map ka center hamesha visible hisse ke beech me rahe (live location chhupe nahi)
+  const mapTranslateY = sheetTop.interpolate({
+    inputRange: [SNAP_TOP, SNAP_HALF],
+    outputRange: [(SNAP_TOP - MAP_H) / 2, (SNAP_HALF - MAP_H) / 2],
+    extrapolate: 'clamp',
+  });
+
+  // recenter button sheet ke upar-upar chale
+  const recenterTop = sheetTop.interpolate({
+    inputRange: [SNAP_TOP, SNAP_HALF],
+    outputRange: [SNAP_TOP - 56, SNAP_HALF - 56],
+    extrapolate: 'clamp',
+  });
+
+  // screen khulte hi phone GPS se ek baar location lo (sirf map dikhane ke liye)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const ok = await ensureLocationPermission();
+        if (!ok) return;
+        const c = await getCurrentCoords();
+        if (!cancelled) setGpsOnce(c);
+      } catch (e) {
+        console.log('map gps error', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // location badle to map wahan le jao
+  useEffect(() => {
+    homeMapRef.current?.animateToRegion(
+      {
+        latitude: mapCenter.latitude,
+        longitude: mapCenter.longitude,
+        latitudeDelta: MAP_ZOOM,
+        longitudeDelta: MAP_ZOOM,
+      },
+      600,
+    );
+  }, [mapCenter.latitude, mapCenter.longitude]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Place suggestions from the backend while typing (400ms debounce)
   useEffect(() => {
@@ -1176,7 +591,6 @@ export default function CaptainHomeScreen() {
       console.log('fetch rides error', e?.response?.data || e?.message);
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
   }, []);
 
@@ -1194,7 +608,7 @@ export default function CaptainHomeScreen() {
     fetchRides();
   }, [fetchRides]);
 
-  // Fresh captain data when the screen is focused (and when returning from Profile)
+  // Fresh captain data when the screen is focused (and when returning from Profile / ride screen)
   useFocusEffect(
     useCallback(() => {
       fetchCaptain();
@@ -1207,6 +621,22 @@ export default function CaptainHomeScreen() {
     [rides],
   );
   const hasActiveRide = !!activeRide;
+
+  // Open the tracking screen for a ride
+  const openRide = useCallback(
+    (captainRideId: string) => navigation.navigate('CaptainRide', { captainRideId }),
+    [navigation],
+  );
+
+  // If the app opens (or the captain returns) with an ongoing ride, jump to the
+  // tracking screen once per ride. Going back to Home afterwards does not re-open it.
+  const autoOpenedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (loading || !isFocused || !activeRide) return;
+    if (autoOpenedRef.current === activeRide.id) return;
+    autoOpenedRef.current = activeRide.id;
+    openRide(activeRide.id);
+  }, [loading, isFocused, activeRide, openRide]);
 
   // After a ride completes, the summary popup opens while payment or rating is pending
   const [dismissedIds, setDismissedIds] = useState<string[]>([]);
@@ -1221,47 +651,77 @@ export default function CaptainHomeScreen() {
       .catch(() => {})
       .finally(() => setDismissLoaded(true));
   }, []);
+const summaryRide = useMemo(() => {
+  if (!dismissLoaded) return null;
 
-  const summaryRide = useMemo(
+  const done = rides.filter((r) => r.status === 'COMPLETED' && !!r.completedAt);
+
+  // Payment pending: koi window / dismiss nahi, jab tak Cash ya UPI select na ho
+  const unpaid = done.find((r) => !r.ride?.paidAt);
+  if (unpaid) return unpaid;
+
+  // Paid, sirf rating baaki
+  return (
+    done.find(
+      (r) =>
+        Date.now() - new Date(r.completedAt!).getTime() < SUMMARY_WINDOW_MS &&
+        r.ride?.userRating == null &&
+        !dismissedIds.includes(r.id),
+    ) ?? null
+  );
+}, [rides, dismissedIds, dismissLoaded]);
+
+const closeSummary = () => {
+  if (summaryRide) {
+    const id = summaryRide.id;
+    const next = [...dismissedIds, id].slice(-50);
+    setDismissedIds(next);
+    AsyncStorage.setItem(DISMISSED_KEY, JSON.stringify(next)).catch(() => {});
+    setRides((prev: any[]) =>
+      prev.map((r) =>
+        r.id === id
+          ? { ...r, ride: { ...r.ride, paidAt: r.ride?.paidAt ?? new Date().toISOString() } }
+          : r,
+      ),
+    );
+  }
+  fetchRides();
+};
+
+  // Recent activity: tap par completed ride ka summary dobara dekhne ke liye
+  const [viewSummaryId, setViewSummaryId] = useState<string | null>(null);
+
+  // Latest N rides (completed / cancelled / active), naya pehle
+  const recentRides = useMemo(
     () =>
-      !dismissLoaded
-        ? null
-        : rides.find(
-            (r) =>
-              r.status === 'COMPLETED' &&
-              !!r.completedAt &&
-              Date.now() - new Date(r.completedAt).getTime() < SUMMARY_WINDOW_MS &&
-              (!r.ride?.paidAt || r.ride?.userRating == null) &&
-              !dismissedIds.includes(r.id),
-          ) ?? null,
-    [rides, dismissedIds, dismissLoaded],
+      [...rides]
+        .sort((a: any, b: any) => {
+          const ta = new Date(a.completedAt ?? a.cancelledAt ?? a.createdAt ?? 0).getTime();
+          const tb = new Date(b.completedAt ?? b.cancelledAt ?? b.createdAt ?? 0).getTime();
+          return tb - ta;
+        })
+        .slice(0, RECENT_LIMIT),
+    [rides],
   );
 
-  const closeSummary = () => {
-    if (summaryRide) {
-      const next = [...dismissedIds, summaryRide.id].slice(-50);
-      setDismissedIds(next);
-      AsyncStorage.setItem(DISMISSED_KEY, JSON.stringify(next)).catch(() => {});
-    }
-    fetchRides();
-  };
-
-  // While online, send the live location to the backend every 10 sec
+  // While online, send the live location to the backend every 10 sec.
+  // The ride tracking screen pushes its own location while it is open,
+  // so Home pauses here when it is not the focused screen.
   useEffect(() => {
-    if (!online) return;
+    if (!online || !isFocused) return;
 
     pushLocation();
     const t = setInterval(pushLocation, LOCATION_PUSH_MS);
 
     return () => clearInterval(t);
-  }, [online, pushLocation]);
+  }, [online, isFocused, pushLocation]);
 
   // While online or on an active ride, refresh rides every 10 sec
   useEffect(() => {
-    if (!online && !hasActiveRide) return;
+    if (!isFocused || (!online && !hasActiveRide)) return;
     const t = setInterval(fetchRides, 10000);
     return () => clearInterval(t);
-  }, [online, hasActiveRide, fetchRides]);
+  }, [online, hasActiveRide, isFocused, fetchRides]);
 
   // While online with no active ride, fetch new requests every 8 sec
   useEffect(() => {
@@ -1270,11 +730,12 @@ export default function CaptainHomeScreen() {
       setAvailableError('');
       return;
     }
+    if (!isFocused) return;
 
     fetchAvailable();
     const t = setInterval(fetchAvailable, 8000);
     return () => clearInterval(t);
-  }, [online, hasActiveRide, fetchAvailable]);
+  }, [online, hasActiveRide, isFocused, fetchAvailable]);
 
   // ---------- stats ----------
   const stats = useMemo(() => {
@@ -1469,9 +930,11 @@ export default function CaptainHomeScreen() {
         `/captain-rides/accept/${rideId}`,
       );
       setAvailableRides([]);
+      // Already opening it below, so the auto-open effect must not open it again
+      autoOpenedRef.current = res.data.id;
       await fetchRides();
-      // On accept, open the map screen: customer's pickup point + route
-      navigation.navigate('CaptainRide', { captainRideId: res.data.id });
+      // On accept, open the tracking screen: customer's pickup point + route
+      openRide(res.data.id);
     } catch (e: any) {
       Alert.alert('Could not accept', getErrorMessage(e, 'Could not accept the ride'));
       // Another captain may have taken it; reload the list
@@ -1481,95 +944,38 @@ export default function CaptainHomeScreen() {
     }
   };
 
-  const updateStatus = async (
-    captainRideId: string,
-    status: CaptainRideStatus,
-    cancellationReason?: string,
-    otp?: string,
-  ): Promise<boolean> => {
-    try {
-      setUpdating(true);
-      await api.patch(`/captain-rides/${captainRideId}/status`, {
-        status,
-        ...(cancellationReason ? { cancellationReason } : {}),
-        ...(otp ? { otp } : {}),
-      });
-      await fetchRides();
-      return true;
-    } catch (e: any) {
-      Alert.alert('Error', getErrorMessage(e, 'Status update failed'));
-      return false;
-    } finally {
-      setUpdating(false);
-    }
-  };
-
-  const nextAction = activeRide ? NEXT_ACTION[activeRide.status] : undefined;
-
-  // On the next-action button: confirm the drop location before COMPLETED
-  const onNextActionPress = () => {
-    if (!activeRide || !nextAction) return;
-
-    if (nextAction.next === 'COMPLETED') {
-      const dropLat = Number(activeRide.ride?.dropLatitude);
-      const dropLng = Number(activeRide.ride?.dropLongitude);
-      const hasDrop =
-        activeRide.ride?.dropLatitude != null &&
-        activeRide.ride?.dropLongitude != null &&
-        !Number.isNaN(dropLat) &&
-        !Number.isNaN(dropLng);
-
-      const far =
-        myLocation && hasDrop
-          ? distanceM(myLocation, { latitude: dropLat, longitude: dropLng })
-          : null;
-
-      confirmComplete(() => updateStatus(activeRide.id, 'COMPLETED'), far);
-      return;
-    }
-
-    // Starting the ride needs the OTP from the customer
-    if (nextAction.next === 'STARTED') {
-      setOtpValue('');
-      setOtpVisible(true);
-      return;
-    }
-
-    updateStatus(activeRide.id, nextAction.next);
-  };
-
-  const onConfirmOtp = async () => {
-    if (!activeRide) return;
-    if (otpValue.length !== 4) {
-      Alert.alert('OTP required', 'Enter the 4-digit OTP shown on the customer\'s phone');
-      return;
-    }
-    const ok = await updateStatus(activeRide.id, 'STARTED', undefined, otpValue);
-    if (ok) {
-      setOtpVisible(false);
-      setOtpValue('');
-    }
-  };
-
-  const onConfirmCancel = async () => {
-    if (!activeRide) return;
-    if (!cancelReason.trim()) {
-      Alert.alert('Reason required', 'Please enter a cancellation reason');
-      return;
-    }
-    setCancelVisible(false);
-    await updateStatus(activeRide.id, 'CANCELLED', cancelReason.trim());
-    setCancelReason('');
-  };
-
-  const onRefresh = async () => {
-    setRefreshing(true);
+  // Rides + captain data + location refresh (pull-to-refresh ki jagah ye map ka button chalata hai)
+  const refreshAll = async () => {
     fetchRides();
     fetchCaptain();
     if (online) {
       await pushLocation();
       if (!hasActiveRide) fetchAvailable();
     }
+  };
+
+  const onRecenter = async () => {
+    refreshAll();
+
+    // offline hone par phone GPS se map ki location fresh karo
+    if (!online) {
+      try {
+        const c = await getCurrentCoords();
+        setGpsOnce(c);
+      } catch (e) {
+        console.log('recenter gps error', e);
+      }
+    }
+
+    homeMapRef.current?.animateToRegion(
+      {
+        latitude: mapCenter.latitude,
+        longitude: mapCenter.longitude,
+        latitudeDelta: MAP_ZOOM,
+        longitudeDelta: MAP_ZOOM,
+      },
+      500,
+    );
   };
 
   // Which range / ride types the incoming requests are filtered by
@@ -1586,395 +992,518 @@ export default function CaptainHomeScreen() {
     <SafeAreaView style={styles.container} edges={['top']}>
       <StatusBar barStyle="dark-content" />
 
-      {/* Header: RAPTOR brand on the left, online toggle + notifications on the right */}
-      <View style={styles.header}>
-        <Image source={{ uri: RAPTR_LOGO }} style={styles.logo} resizeMode="contain" />
-
-        <View style={styles.headerRight}>
-          <View style={[styles.statusPill, online && styles.statusPillOn]}>
-            <View style={[styles.statusDot, online && styles.statusDotOn]} />
-            <Text style={[styles.switchText, online && styles.switchTextOn]}>
-              {online ? 'ONLINE' : 'OFFLINE'}
-            </Text>
-            {togglingOnline ? (
-              <ActivityIndicator color={BLUE} style={styles.switchLoader} />
-            ) : (
-              <Switch
-                value={online}
-                onValueChange={onToggleOnline}
-                trackColor={{ false: '#CBD5E1', true: '#86EFAC' }}
-                thumbColor={online ? GREEN : '#fff'}
-              />
-            )}
-          </View>
-
-          {/* Notifications: count of new ride requests */}
-          <TouchableOpacity
-            style={styles.bellBtn}
-            activeOpacity={0.8}
-            onPress={() =>
-              Alert.alert(
-                'Notifications',
-                availableRides.length > 0
-                  ? `${availableRides.length} new ride request${availableRides.length > 1 ? 's' : ''}`
-                  : 'No new notifications',
-              )
-            }
+      <View style={styles.flex}>
+        {/* MAP (sabse peeche, live location ke saath) */}
+        <Animated.View
+          style={[
+            styles.mapWrap,
+            { height: MAP_H, transform: [{ translateY: mapTranslateY }] },
+          ]}
+        >
+          <MapView
+            ref={homeMapRef}
+            provider={PROVIDER_GOOGLE}
+            style={StyleSheet.absoluteFill}
+            initialRegion={{
+              latitude: mapCenter.latitude,
+              longitude: mapCenter.longitude,
+              latitudeDelta: MAP_ZOOM,
+              longitudeDelta: MAP_ZOOM,
+            }}
+            showsUserLocation
+            showsMyLocationButton={false}
+            showsCompass={false}
+            toolbarEnabled={false}
+            scrollEnabled={false}
+            zoomEnabled={false}
+            rotateEnabled={false}
+            pitchEnabled={false}
           >
-            <Ionicons name="notifications-outline" size={21} color={BLACK} />
-            {availableRides.length > 0 && (
-              <View style={styles.bellBadge}>
-                <Text style={styles.bellBadgeText}>
-                  {availableRides.length > 9 ? '9+' : availableRides.length}
-                </Text>
-              </View>
+            {/* Manual location choose ki ho to uska marker */}
+            {manualLocation && myLocation && (
+              <Marker coordinate={myLocation} pinColor="blue" title="Your location" />
             )}
-          </TouchableOpacity>
-        </View>
-      </View>
+          </MapView>
+        </Animated.View>
 
-      <ScrollView
-        contentContainerStyle={styles.scroll}
-        showsVerticalScrollIndicator={false}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={BLUE} />
-        }
-      >
-        {/* Captain's current location (when online) */}
-        {online && (
-          <View style={styles.locCard}>
-            <View style={styles.locIcon}>
-              <Ionicons name="location" size={22} color={BLUE} />
-            </View>
-            <View style={styles.flex}>
-              <Text style={styles.locLabel}>
-                YOUR LOCATION{manualLocation ? '  •  MANUAL' : '  •  LIVE'}
+        {/* Header: RAPTOR brand on the left, online toggle + notifications on the right (map ke upar) */}
+        <View style={styles.header} pointerEvents="box-none">
+          <Image source={{ uri: RAPTR_LOGO }} style={styles.logo} resizeMode="contain" />
+
+          <View style={styles.headerRight}>
+            <View style={[styles.statusPill, online && styles.statusPillOn]}>
+              <View style={[styles.statusDot, online && styles.statusDotOn]} />
+              <Text style={[styles.switchText, online && styles.switchTextOn]}>
+                {online ? 'ONLINE' : 'OFFLINE'}
               </Text>
-              <Text style={styles.locText} numberOfLines={2}>
-                {myAddress ||
-                  (myLocation
-                    ? `${myLocation.latitude.toFixed(5)}, ${myLocation.longitude.toFixed(5)}`
-                    : 'Fetching location...')}
-              </Text>
-              {locationOk ? (
-                <Text style={styles.locSub}>
-                  Customers will see their distance from this location
-                </Text>
+              {togglingOnline ? (
+                <ActivityIndicator color={BLUE} style={styles.switchLoader} />
               ) : (
-                <Text style={[styles.locSub, styles.locSubError]}>
-                  Unable to fetch location. Please turn on GPS.
-                </Text>
+                <Switch
+                  value={online}
+                  onValueChange={onToggleOnline}
+                  trackColor={{ false: '#CBD5E1', true: '#86EFAC' }}
+                  thumbColor={online ? GREEN : '#fff'}
+                />
               )}
             </View>
+
+            {/* Notifications: count of new ride requests */}
             <TouchableOpacity
-              style={styles.locBtn}
+              style={styles.bellBtn}
               activeOpacity={0.8}
-              onPress={openLocationPicker}
+              onPress={() =>
+                Alert.alert(
+                  'Notifications',
+                  availableRides.length > 0
+                    ? `${availableRides.length} new ride request${availableRides.length > 1 ? 's' : ''}`
+                    : 'No new notifications',
+                )
+              }
             >
-              <Text style={styles.locBtnText}>Change</Text>
+              <Ionicons name="notifications-outline" size={21} color={BLACK} />
+              {availableRides.length > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>
+                    {availableRides.length > 9 ? '9+' : availableRides.length}
+                  </Text>
+                </View>
+              )}
             </TouchableOpacity>
-          </View>
-        )}
-
-        {/* Today's earnings */}
-        <View style={styles.earnCard}>
-          <View style={styles.earnCircleBig} />
-          <View style={styles.earnCircleSmall} />
-
-          <View style={styles.earnTop}>
-            <View>
-              <Text style={styles.earnLabel}>Today's earnings</Text>
-              <Text style={styles.earnValue}>₹ {stats.todayEarning.toFixed(0)}</Text>
-            </View>
-            <View style={styles.earnIcon}>
-              <Ionicons name="wallet-outline" size={22} color="#fff" />
-            </View>
-          </View>
-
-          <View style={styles.earnRow}>
-            {TODAY.map((t, i) => (
-              <View
-                key={t.id}
-                style={[styles.earnStat, i < TODAY.length - 1 && styles.earnDivider]}
-              >
-                <Text style={styles.earnStatValue}>{t.value}</Text>
-                <Text style={styles.earnStatLabel}>{t.label}</Text>
-              </View>
-            ))}
           </View>
         </View>
 
-        {/* Active ride / Requests / Status */}
-        {loading ? (
-          <View style={styles.statusCard}>
-            <ActivityIndicator color={BLUE} />
-          </View>
-        ) : activeRide ? (
-          <CaptainRideCard
-            ride={activeRide}
-            updating={updating}
-            nextActionLabel={nextAction?.label}
-            onNextAction={onNextActionPress}
-            onOpenMap={() =>
-              navigation.navigate('CaptainRide', { captainRideId: activeRide.id })
-            }
-            onCancel={() => setCancelVisible(true)}
-          />
-        ) : online && availableRides.length > 0 ? (
-          <View>
-            <View style={styles.requestsHead}>
-              <Text style={styles.requestsTitle}>New requests</Text>
-              <View style={styles.requestsCount}>
-                <Text style={styles.requestsCountText}>{availableRides.length}</Text>
+        {/* Recenter + refresh button (sheet ke saath upar-neeche hota hai) */}
+        <Animated.View style={[styles.recenter, { top: recenterTop }]}>
+          <TouchableOpacity
+            onPress={onRecenter}
+            activeOpacity={0.8}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="locate" size={22} color={BLUE} />
+          </TouchableOpacity>
+        </Animated.View>
+
+        {/* BOTTOM SHEET */}
+        <Animated.View style={[styles.sheet, { top: sheetTop }]} {...panResponder.panHandlers}>
+          <View style={styles.handle} />
+
+          <ScrollView
+            contentContainerStyle={styles.scroll}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            scrollEnabled={!mapExpanded}
+            scrollEventThrottle={16}
+            onScroll={(e) => {
+              scrollY.current = e.nativeEvent.contentOffset.y;
+              hideTabBar(e);
+            }}
+          >
+            {/* Captain's current location (when online) */}
+            {online && (
+              <View style={styles.locCard}>
+                <View style={styles.locIcon}>
+                  <Ionicons name="location" size={22} color={BLUE} />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={styles.locLabel}>
+                    YOUR LOCATION{manualLocation ? '  •  MANUAL' : '  •  LIVE'}
+                  </Text>
+                  <Text style={styles.locText} numberOfLines={2}>
+                    {myAddress ||
+                      (myLocation
+                        ? `${myLocation.latitude.toFixed(5)}, ${myLocation.longitude.toFixed(5)}`
+                        : 'Fetching location...')}
+                  </Text>
+                  {locationOk ? (
+                    <Text style={styles.locSub}>
+                      Customers will see their distance from this location
+                    </Text>
+                  ) : (
+                    <Text style={[styles.locSub, styles.locSubError]}>
+                      Unable to fetch location. Please turn on GPS.
+                    </Text>
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={styles.locBtn}
+                  activeOpacity={0.8}
+                  onPress={openLocationPicker}
+                >
+                  <Text style={styles.locBtnText}>Change</Text>
+                </TouchableOpacity>
               </View>
-            </View>
-            {!!filterSummary && (
-              <Text style={styles.filterText}>{filterSummary}</Text>
             )}
 
-            {availableRides.map((r) => {
-              const accepting = acceptingId === r.id;
-              const parcelLike = r.category === 'PARCEL' || r.category === 'GOODS';
-              const hasSender = !!r.senderName || !!r.senderPhone;
-              const look = vehicleLook(r.category, r.vehicleType);
+            {/* Today's earnings */}
+            <View style={styles.earnCard}>
+              <View style={styles.earnCircleBig} />
+              <View style={styles.earnCircleSmall} />
 
-              // Summary strip: only show values that exist
-              const reqStats: { id: string; value: string; label: string }[] = [];
-              if (r.distance != null) {
-                reqStats.push({
-                  id: 'dist',
-                  value: `${Number(r.distance).toFixed(1)} km`,
-                  label: 'Distance',
-                });
-              }
-              if (r.duration != null) {
-                reqStats.push({
-                  id: 'dur',
-                  value: `${Math.round(Number(r.duration))} min`,
-                  label: 'Duration',
-                });
-              }
-              if (parcelLike && !!r.parcelSize) {
-                reqStats.push({
-                  id: 'size',
-                  value: prettyLabel(r.parcelSize),
-                  label: 'Package size',
-                });
-              }
+              <View style={styles.earnTop}>
+                <View>
+                  <Text style={styles.earnLabel}>Today's earnings</Text>
+                  <Text style={styles.earnValue}>₹ {stats.todayEarning.toFixed(0)}</Text>
+                </View>
+                <View style={styles.earnIcon}>
+                  <Ionicons name="wallet-outline" size={22} color="#fff" />
+                </View>
+              </View>
 
-              return (
-                <View key={r.id} style={styles.reqCard}>
-                  {/* Header: vehicle tile + type, fare */}
-                  <View style={styles.reqHeader}>
-                    <View style={[styles.reqVehicleTile, { backgroundColor: look.tint }]}>
-                      <Text style={styles.reqVehicleEmoji}>{look.emoji}</Text>
-                    </View>
-                    <View style={styles.flex}>
-                      <View style={styles.reqTypePill}>
-                        <Text style={styles.reqTypePillText}>
-                          {CATEGORY_LABEL[r.category]}
-                        </Text>
-                      </View>
-                      {!!r.vehicleType && (
-                        <Text style={styles.reqVehicle}>{prettyLabel(r.vehicleType)}</Text>
-                      )}
-                    </View>
-                    <View style={styles.reqFareWrap}>
-                      <Text style={styles.reqFare}>
-                        ₹{Number(r.fare ?? 0).toFixed(0)}
-                      </Text>
-                      <Text style={styles.reqFareLabel}>Offered fare</Text>
-                    </View>
+              <View style={styles.earnRow}>
+                {TODAY.map((t, i) => (
+                  <View
+                    key={t.id}
+                    style={[styles.earnStat, i < TODAY.length - 1 && styles.earnDivider]}
+                  >
+                    <Text style={styles.earnStatValue}>{t.value}</Text>
+                    <Text style={styles.earnStatLabel}>{t.label}</Text>
                   </View>
+                ))}
+              </View>
+            </View>
 
-                  {/* Route */}
-                  <View style={styles.reqRoute}>
-                    <View style={[styles.reqStopRow, styles.reqStopRowFirst]}>
-                      <View style={styles.reqDotCol}>
-                        <View style={[styles.reqDot, { backgroundColor: GREEN }]} />
-                        <View style={styles.reqLine} />
+            {/* Active ride / Requests / Status */}
+            {loading ? (
+              <View style={styles.statusCard}>
+                <ActivityIndicator color={BLUE} />
+              </View>
+            ) : activeRide ? (
+              // All ride actions (OTP, status, cancel) now live on the tracking screen
+              <CaptainRideCard
+                ride={activeRide}
+                updating={false}
+                nextActionLabel="Continue ride"
+                onNextAction={() => openRide(activeRide.id)}
+                onOpenMap={() => openRide(activeRide.id)}
+                onCancel={() => openRide(activeRide.id)}
+              />
+            ) : online && availableRides.length > 0 ? (
+              <View>
+                <View style={styles.requestsHead}>
+                  <Text style={styles.requestsTitle}>New requests</Text>
+                  <View style={styles.requestsCount}>
+                    <Text style={styles.requestsCountText}>{availableRides.length}</Text>
+                  </View>
+                </View>
+                {!!filterSummary && (
+                  <Text style={styles.filterText}>{filterSummary}</Text>
+                )}
+
+                {availableRides.map((r) => {
+                  const accepting = acceptingId === r.id;
+                  const parcelLike = r.category === 'PARCEL' || r.category === 'GOODS';
+                  const hasSender = !!r.senderName || !!r.senderPhone;
+                  const look = vehicleLook(r.category, r.vehicleType);
+
+                  // Summary strip: only show values that exist
+                  const reqStats: { id: string; value: string; label: string }[] = [];
+                  if (r.distance != null) {
+                    reqStats.push({
+                      id: 'dist',
+                      value: `${Number(r.distance).toFixed(1)} km`,
+                      label: 'Distance',
+                    });
+                  }
+                  if (r.duration != null) {
+                    reqStats.push({
+                      id: 'dur',
+                      value: `${Math.round(Number(r.duration))} min`,
+                      label: 'Duration',
+                    });
+                  }
+                  if (parcelLike && !!r.parcelSize) {
+                    reqStats.push({
+                      id: 'size',
+                      value: prettyLabel(r.parcelSize),
+                      label: 'Package size',
+                    });
+                  }
+
+                  return (
+                    <View key={r.id} style={styles.reqCard}>
+                      {/* Header: vehicle tile + type, fare */}
+                      <View style={styles.reqHeader}>
+                        <View style={[styles.reqVehicleTile, { backgroundColor: look.tint }]}>
+                          <Text style={styles.reqVehicleEmoji}>{look.emoji}</Text>
+                        </View>
+                        <View style={styles.flex}>
+                          <View style={styles.reqTypePill}>
+                            <Text style={styles.reqTypePillText}>
+                              {CATEGORY_LABEL[r.category]}
+                            </Text>
+                          </View>
+                          {!!r.vehicleType && (
+                            <Text style={styles.reqVehicle}>{prettyLabel(r.vehicleType)}</Text>
+                          )}
+                        </View>
+                        <View style={styles.reqFareWrap}>
+                          <Text style={styles.reqFare}>
+                            ₹{Number(r.fare ?? 0).toFixed(0)}
+                          </Text>
+                          <Text style={styles.reqFareLabel}>Offered fare</Text>
+                        </View>
                       </View>
-                      <View style={styles.flex}>
-                        <View style={styles.reqStopTop}>
-                          <Text style={styles.reqStopLabel}>PICKUP</Text>
-                          {r.pickupDistanceKm != null && (
-                            <View style={styles.awayPill}>
-                              <Ionicons name="navigate" size={11} color={BLUE} />
-                              <Text style={styles.reqAway}>
-                                {Number(r.pickupDistanceKm).toFixed(1)} km away
-                              </Text>
+
+                      {/* Route */}
+                      <View style={styles.reqRoute}>
+                        <View style={[styles.reqStopRow, styles.reqStopRowFirst]}>
+                          <View style={styles.reqDotCol}>
+                            <View style={[styles.reqDot, { backgroundColor: GREEN }]} />
+                            <View style={styles.reqLine} />
+                          </View>
+                          <View style={styles.flex}>
+                            <View style={styles.reqStopTop}>
+                              <Text style={styles.reqStopLabel}>PICKUP</Text>
+                              {r.pickupDistanceKm != null && (
+                                <View style={styles.awayPill}>
+                                  <Ionicons name="navigate" size={11} color={BLUE} />
+                                  <Text style={styles.reqAway}>
+                                    {Number(r.pickupDistanceKm).toFixed(1)} km away
+                                  </Text>
+                                </View>
+                              )}
+                            </View>
+                            <Text style={styles.reqAddress}>{r.pickupAddress}</Text>
+                          </View>
+                        </View>
+
+                        <View style={styles.reqStopRow}>
+                          <View style={styles.reqDotCol}>
+                            <View style={[styles.reqDot, styles.reqDotSquare, { backgroundColor: RED }]} />
+                          </View>
+                          <View style={styles.flex}>
+                            <Text style={styles.reqStopLabel}>DROP</Text>
+                            <Text style={styles.reqAddress}>{r.dropAddress}</Text>
+                          </View>
+                        </View>
+                      </View>
+
+                      {/* Distance / duration / size */}
+                      {reqStats.length > 0 && (
+                        <View style={styles.reqStatsRow}>
+                          {reqStats.map((st, i) => (
+                            <View
+                              key={st.id}
+                              style={[
+                                styles.reqStat,
+                                i < reqStats.length - 1 && styles.reqStatDivider,
+                              ]}
+                            >
+                              <Text style={styles.reqStatValue}>{st.value}</Text>
+                              <Text style={styles.reqStatLabel}>{st.label}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+
+                      {/* Parcel / goods: package + contacts */}
+                      {parcelLike && (
+                        <View style={styles.reqParcelBox}>
+                          {!!r.parcelDescription && (
+                            <View style={styles.reqParcelRow}>
+                              <Ionicons name="cube-outline" size={18} color={BLUE} style={styles.reqParcelIcon} />
+                              <View style={styles.flex}>
+                                <Text style={styles.reqSectionLabel}>PACKAGE</Text>
+                                <Text style={styles.reqParcelDesc}>{r.parcelDescription}</Text>
+                              </View>
+                            </View>
+                          )}
+
+                          <View
+                            style={[
+                              styles.reqContactRow,
+                              !!r.parcelDescription && styles.reqContactRowSpaced,
+                            ]}
+                          >
+                            <Ionicons name="person-outline" size={18} color={BLUE} style={styles.reqParcelIcon} />
+                            <View style={styles.flex}>
+                              <Text style={styles.reqSectionLabel}>RECEIVER</Text>
+                              <Text style={styles.reqContactName}>{r.receiverName || '-'}</Text>
+                            </View>
+                            {!!r.receiverPhone && (
+                              <Text style={styles.reqContactPhone}>{r.receiverPhone}</Text>
+                            )}
+                          </View>
+
+                          {hasSender && (
+                            <View style={[styles.reqContactRow, styles.reqContactRowSpaced]}>
+                              <Ionicons name="send-outline" size={18} color={BLUE} style={styles.reqParcelIcon} />
+                              <View style={styles.flex}>
+                                <Text style={styles.reqSectionLabel}>SENDER</Text>
+                                <Text style={styles.reqContactName}>{r.senderName || '-'}</Text>
+                              </View>
+                              {!!r.senderPhone && (
+                                <Text style={styles.reqContactPhone}>{r.senderPhone}</Text>
+                              )}
                             </View>
                           )}
                         </View>
-                        <Text style={styles.reqAddress}>{r.pickupAddress}</Text>
-                      </View>
-                    </View>
-
-                    <View style={styles.reqStopRow}>
-                      <View style={styles.reqDotCol}>
-                        <View style={[styles.reqDot, styles.reqDotSquare, { backgroundColor: RED }]} />
-                      </View>
-                      <View style={styles.flex}>
-                        <Text style={styles.reqStopLabel}>DROP</Text>
-                        <Text style={styles.reqAddress}>{r.dropAddress}</Text>
-                      </View>
-                    </View>
-                  </View>
-
-                  {/* Distance / duration / size */}
-                  {reqStats.length > 0 && (
-                    <View style={styles.reqStatsRow}>
-                      {reqStats.map((st, i) => (
-                        <View
-                          key={st.id}
-                          style={[
-                            styles.reqStat,
-                            i < reqStats.length - 1 && styles.reqStatDivider,
-                          ]}
-                        >
-                          <Text style={styles.reqStatValue}>{st.value}</Text>
-                          <Text style={styles.reqStatLabel}>{st.label}</Text>
-                        </View>
-                      ))}
-                    </View>
-                  )}
-
-                  {/* Parcel / goods: package + contacts */}
-                  {parcelLike && (
-                    <View style={styles.reqParcelBox}>
-                      {!!r.parcelDescription && (
-                        <View style={styles.reqParcelRow}>
-                          <Ionicons name="cube-outline" size={18} color={BLUE} style={styles.reqParcelIcon} />
-                          <View style={styles.flex}>
-                            <Text style={styles.reqSectionLabel}>PACKAGE</Text>
-                            <Text style={styles.reqParcelDesc}>{r.parcelDescription}</Text>
-                          </View>
-                        </View>
                       )}
 
+                      <TouchableOpacity
+                        style={[styles.reqAcceptBtn, !!acceptingId && styles.reqAcceptBtnDisabled]}
+                        activeOpacity={0.85}
+                        disabled={!!acceptingId}
+                        onPress={() => acceptRide(r.id)}
+                      >
+                        {accepting ? (
+                          <ActivityIndicator color="#fff" />
+                        ) : (
+                          <>
+                            <Ionicons name="checkmark-circle" size={20} color="#fff" />
+                            <Text style={styles.reqAcceptText}>Accept Request</Text>
+                          </>
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
+              </View>
+            ) : online ? (
+              // Online, waiting: radar animation
+              <View style={styles.statusCard}>
+                <RadarPulse />
+                <Text style={styles.statusTitle}>Looking for requests...</Text>
+                <Text style={styles.statusSub}>
+                  {availableError ||
+                    'Requests matching your ride types and range will appear here'}
+                </Text>
+                {!!filterSummary && !availableError && (
+                  <Text style={styles.statusFilter}>{filterSummary}</Text>
+                )}
+              </View>
+            ) : (
+              // Offline: big power illustration + go online button
+              <View style={styles.statusCard}>
+                <View style={styles.offlineArt}>
+                  <View style={styles.offlineRingOuter} />
+                  <View style={styles.offlineRingInner} />
+                  <View style={styles.offlineCore}>
+                    <Ionicons name="power" size={34} color="#fff" />
+                  </View>
+                </View>
+                <Text style={styles.statusTitle}>You're offline</Text>
+                <Text style={styles.statusSub}>Go online to start receiving ride requests</Text>
+                <TouchableOpacity
+                  style={[styles.goOnlineBtn, togglingOnline && styles.btnDisabled]}
+                  activeOpacity={0.85}
+                  disabled={togglingOnline}
+                  onPress={() => onToggleOnline(true)}
+                >
+                  {togglingOnline ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons name="flash" size={18} color="#fff" />
+                      <Text style={styles.goOnlineText}>Go Online</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Weekly earnings */}
+            <View style={styles.weekCard}>
+              <View style={styles.weekHeader}>
+                <View>
+                  <Text style={styles.weekTitle}>Weekly earnings</Text>
+                  <Text style={styles.weekSub}>Mon – Sun</Text>
+                </View>
+                <Text style={styles.weekTotal}>₹ {stats.weekTotal.toFixed(0)}</Text>
+              </View>
+
+              <View style={styles.chart}>
+                {stats.week.map((w) => (
+                  <View key={w.id} style={styles.barCol}>
+                    <View style={styles.barTrack}>
                       <View
                         style={[
-                          styles.reqContactRow,
-                          !!r.parcelDescription && styles.reqContactRowSpaced,
+                          styles.bar,
+                          w.isToday && styles.barToday,
+                          { height: `${Math.max((w.amount / maxAmount) * 100, 6)}%` },
                         ]}
-                      >
-                        <Ionicons name="person-outline" size={18} color={BLUE} style={styles.reqParcelIcon} />
-                        <View style={styles.flex}>
-                          <Text style={styles.reqSectionLabel}>RECEIVER</Text>
-                          <Text style={styles.reqContactName}>{r.receiverName || '-'}</Text>
-                        </View>
-                        {!!r.receiverPhone && (
-                          <Text style={styles.reqContactPhone}>{r.receiverPhone}</Text>
-                        )}
-                      </View>
-
-                      {hasSender && (
-                        <View style={[styles.reqContactRow, styles.reqContactRowSpaced]}>
-                          <Ionicons name="send-outline" size={18} color={BLUE} style={styles.reqParcelIcon} />
-                          <View style={styles.flex}>
-                            <Text style={styles.reqSectionLabel}>SENDER</Text>
-                            <Text style={styles.reqContactName}>{r.senderName || '-'}</Text>
-                          </View>
-                          {!!r.senderPhone && (
-                            <Text style={styles.reqContactPhone}>{r.senderPhone}</Text>
-                          )}
-                        </View>
-                      )}
+                      />
                     </View>
-                  )}
-
-                  <TouchableOpacity
-                    style={[styles.reqAcceptBtn, !!acceptingId && styles.reqAcceptBtnDisabled]}
-                    activeOpacity={0.85}
-                    disabled={!!acceptingId}
-                    onPress={() => acceptRide(r.id)}
-                  >
-                    {accepting ? (
-                      <ActivityIndicator color="#fff" />
-                    ) : (
-                      <>
-                        <Ionicons name="checkmark-circle" size={20} color="#fff" />
-                        <Text style={styles.reqAcceptText}>Accept Request</Text>
-                      </>
-                    )}
-                  </TouchableOpacity>
-                </View>
-              );
-            })}
-          </View>
-        ) : online ? (
-          // Online, waiting: radar animation
-          <View style={styles.statusCard}>
-            <RadarPulse />
-            <Text style={styles.statusTitle}>Looking for requests...</Text>
-            <Text style={styles.statusSub}>
-              {availableError ||
-                'Requests matching your ride types and range will appear here'}
-            </Text>
-            {!!filterSummary && !availableError && (
-              <Text style={styles.statusFilter}>{filterSummary}</Text>
-            )}
-          </View>
-        ) : (
-          // Offline: big power illustration + go online button
-          <View style={styles.statusCard}>
-            <View style={styles.offlineArt}>
-              <View style={styles.offlineRingOuter} />
-              <View style={styles.offlineRingInner} />
-              <View style={styles.offlineCore}>
-                <Ionicons name="power" size={34} color="#fff" />
+                    <Text style={[styles.barDay, w.isToday && styles.barDayToday]}>
+                      {w.day}
+                    </Text>
+                  </View>
+                ))}
               </View>
             </View>
-            <Text style={styles.statusTitle}>You're offline</Text>
-            <Text style={styles.statusSub}>Go online to start receiving ride requests</Text>
-            <TouchableOpacity
-              style={[styles.goOnlineBtn, togglingOnline && styles.btnDisabled]}
-              activeOpacity={0.85}
-              disabled={togglingOnline}
-              onPress={() => onToggleOnline(true)}
-            >
-              {togglingOnline ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <>
-                  <Ionicons name="flash" size={18} color="#fff" />
-                  <Text style={styles.goOnlineText}>Go Online</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
-        )}
 
-        {/* Weekly earnings */}
-        <View style={styles.weekCard}>
-          <View style={styles.weekHeader}>
-            <View>
-              <Text style={styles.weekTitle}>Weekly earnings</Text>
-              <Text style={styles.weekSub}>Mon – Sun</Text>
+            {/* Recent activity */}
+            <View style={styles.sectionRow}>
+              <Text style={styles.sectionTitleInline}>Recent Activity</Text>
             </View>
-            <Text style={styles.weekTotal}>₹ {stats.weekTotal.toFixed(0)}</Text>
-          </View>
 
-          <View style={styles.chart}>
-            {stats.week.map((w) => (
-              <View key={w.id} style={styles.barCol}>
-                <View style={styles.barTrack}>
-                  <View
-                    style={[
-                      styles.bar,
-                      w.isToday && styles.barToday,
-                      { height: `${Math.max((w.amount / maxAmount) * 100, 6)}%` },
-                    ]}
-                  />
-                </View>
-                <Text style={[styles.barDay, w.isToday && styles.barDayToday]}>
-                  {w.day}
+            {!loading && recentRides.length === 0 ? (
+              <View style={styles.emptyCard}>
+                <Text style={styles.emptyEmoji}>🚕</Text>
+                <Text style={styles.emptyTitle}>No rides yet</Text>
+                <Text style={styles.emptySub}>
+                  Go online, aapki pehli ride yaha dikhegi
                 </Text>
               </View>
-            ))}
-          </View>
-        </View>
-      </ScrollView>
+            ) : (
+              <View style={styles.recentCard}>
+                {recentRides.map((r: any, i) => {
+                  const status = String(r.status ?? '').toUpperCase();
+const category = r.ride?.category ?? r.category;
+const vehicleType = r.ride?.vehicleType ?? r.vehicleType;
+const look = vehicleLook(category, vehicleType);
+
+                  const tone = recentTone(status);
+                  const active = ACTIVE_STATUSES.includes(r.status);
+                  const completed = status === 'COMPLETED';
+                  const when = timeAgo(r.completedAt ?? r.cancelledAt ?? r.createdAt);
+                  const tappable = active || completed; // cancelled par tap nahi
+
+                  return (
+                    <TouchableOpacity
+                      key={r.id}
+                      activeOpacity={tappable ? 0.7 : 1}
+                      disabled={!tappable}
+                      onPress={() => (active ? openRide(r.id) : setViewSummaryId(r.id))}
+                      style={[
+                        styles.recentRow,
+                        i === recentRides.length - 1 && styles.noBorder,
+                      ]}
+                    >
+                      <View style={[styles.recentIcon, { backgroundColor: look.tint }]}>
+                        <Text style={styles.recentEmoji}>{look.emoji}</Text>
+                      </View>
+                      <View style={styles.flex}>
+                        <Text style={styles.recentTitle}>
+                          {rideTitle(category, vehicleType)}
+                        </Text>
+                        <Text style={styles.recentSub}>
+                          {active
+                            ? 'Tap to continue'
+                            : completed
+                            ? `${when} • View details`
+                            : when}
+                        </Text>
+                      </View>
+                      <View style={styles.recentRight}>
+                        {completed && r.earning != null && (
+                          <Text style={styles.amount}>₹{Number(r.earning).toFixed(0)}</Text>
+                        )}
+                        <View style={[styles.chip, { backgroundColor: tone.bg }]}>
+                          <Text style={[styles.chipText, { color: tone.fg }]}>
+                            {RECENT_STATUS_LABEL[status] ?? prettyLabel(r.status)}
+                          </Text>
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+          </ScrollView>
+        </Animated.View>
+      </View>
 
       {/* Change location: tap on the map or drag the marker */}
       <Modal
@@ -2075,8 +1604,8 @@ export default function CaptainHomeScreen() {
         </SafeAreaView>
       </Modal>
 
-      {/* After ride completion: payment + details + rating */}
-      {summaryRide && (
+      {/* After ride completion: payment + details + rating (only while Home is the focused screen) */}
+      {summaryRide && isFocused && (
         <RideSummaryModal
           key={summaryRide.id}
           captainRideId={summaryRide.id}
@@ -2084,99 +1613,17 @@ export default function CaptainHomeScreen() {
         />
       )}
 
-      {/* Start ride: OTP from the customer */}
-      <Modal
-        visible={otpVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setOtpVisible(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <View style={styles.modalIcon}>
-              <Ionicons name="shield-checkmark" size={26} color={BLUE} />
-            </View>
-            <Text style={styles.modalTitleCenter}>Enter pickup OTP</Text>
-            <Text style={styles.otpHint}>
-              Ask the customer for the 4-digit OTP shown on their phone, then start the trip to the drop location.
-            </Text>
-            <TextInput
-              style={styles.otpInput}
-              placeholder="----"
-              placeholderTextColor={GREY}
-              value={otpValue}
-              onChangeText={(t) => setOtpValue(t.replace(/\D/g, '').slice(0, 4))}
-              keyboardType="number-pad"
-              maxLength={4}
-              autoFocus
-            />
-            <View style={styles.modalRow}>
-              <TouchableOpacity
-                style={[styles.modalBtn, styles.modalBtnGhost]}
-                disabled={updating}
-                onPress={() => setOtpVisible(false)}
-              >
-                <Text style={styles.modalBtnGhostText}>Back</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.modalBtn,
-                  { backgroundColor: BLUE },
-                  (otpValue.length !== 4 || updating) && styles.btnDisabled,
-                ]}
-                disabled={otpValue.length !== 4 || updating}
-                onPress={onConfirmOtp}
-              >
-                {updating ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.modalBtnText}>Start Trip to Drop</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      {/* Cancel reason modal */}
-      <Modal
-        visible={cancelVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setCancelVisible(false)}
-      >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <View style={[styles.modalIcon, styles.modalIconRed]}>
-              <Ionicons name="close-circle" size={28} color={RED} />
-            </View>
-            <Text style={styles.modalTitleCenter}>Cancel this ride?</Text>
-            <Text style={styles.otpHint}>Please tell us why you are cancelling.</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Write a reason..."
-              placeholderTextColor={GREY}
-              value={cancelReason}
-              onChangeText={setCancelReason}
-              multiline
-            />
-            <View style={styles.modalRow}>
-              <TouchableOpacity
-                style={[styles.modalBtn, styles.modalBtnGhost]}
-                onPress={() => setCancelVisible(false)}
-              >
-                <Text style={styles.modalBtnGhostText}>Back</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalBtn, { backgroundColor: RED }]}
-                onPress={onConfirmCancel}
-              >
-                <Text style={styles.modalBtnText}>Cancel Ride</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {/* Recent activity: tap on a completed ride to view its summary again */}
+      {viewSummaryId && !summaryRide && isFocused && (
+        <RideSummaryModal
+          key={`view-${viewSummaryId}`}
+          captainRideId={viewSummaryId}
+          onClose={() => {
+            setViewSummaryId(null);
+            fetchRides();
+          }}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -2186,30 +1633,78 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: BG },
   scroll: { padding: 14, paddingBottom: 28 },
 
-  // header: brand left, toggle + bell right
+  // map (sabse peeche)
+  mapWrap: { position: 'absolute', left: 0, right: 0, top: 0 },
+  recenter: {
+    position: 'absolute',
+    right: 16,
+    zIndex: 4,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+    shadowColor: BLACK,
+    shadowOpacity: 0.15,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+
+  // bottom sheet
+  sheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: BG,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    elevation: 12,
+    shadowColor: BLACK,
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -3 },
+  },
+  handle: {
+    alignSelf: 'center',
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#CBD5E1',
+    marginTop: 8,
+    marginBottom: 6,
+  },
+
+  // header (map ke upar): brand left, toggle + bell right
   header: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 5,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#fff',
     paddingHorizontal: 16,
-    paddingVertical: 10,
-    elevation: 3,
-    shadowColor: BLACK,
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
+    paddingTop: 8,
   },
   headerRight: { flexDirection: 'row', alignItems: 'center' },
   statusPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: BG,
+    backgroundColor: '#fff',
     borderRadius: 999,
     paddingLeft: 10,
     paddingRight: 2,
+    elevation: 4,
+    shadowColor: BLACK,
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
   },
- logo: { width: 148, height: 52, marginLeft: -34 },
+  logo: { width: 148, height: 52, marginLeft: -34 },
   statusPillOn: { backgroundColor: GREEN_LIGHT },
   statusDot: {
     width: 8,
@@ -2226,10 +1721,15 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: BG,
+    backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
     marginLeft: 10,
+    elevation: 4,
+    shadowColor: BLACK,
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
   },
   bellBadge: {
     position: 'absolute',
@@ -2342,6 +1842,21 @@ const styles = StyleSheet.create({
     elevation: 10,
   },
   gpsBtnText: { color: BLUE, fontSize: 14, fontWeight: '700', marginLeft: 6 },
+  primaryBtn: {
+    backgroundColor: BLUE,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  primaryBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
+  btnDisabled: { opacity: 0.6 },
+  cancelBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    marginTop: 6,
+  },
 
   // today's earnings
   earnCard: {
@@ -2631,34 +2146,6 @@ const styles = StyleSheet.create({
   reqAcceptBtnDisabled: { opacity: 0.6 },
   reqAcceptText: { color: '#fff', fontSize: 15, fontWeight: '800', marginLeft: 8 },
 
-  // shared bits (request cards + summary popup)
-  rideHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 14,
-  },
-  rideTitle: { fontSize: 16, fontWeight: '800', color: BLACK },
-  placeRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 12 },
-  dot: { width: 10, height: 10, borderRadius: 5, marginTop: 5, marginRight: 10 },
-  placeLabel: { fontSize: 12, color: GREY },
-  placeText: { fontSize: 14, color: BLACK, fontWeight: '600', marginTop: 1 },
-  primaryBtn: {
-    backgroundColor: BLUE,
-    borderRadius: 14,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  primaryBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
-  btnDisabled: { opacity: 0.6 },
-  cancelBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    marginTop: 6,
-  },
-
   // weekly earnings
   weekCard: {
     backgroundColor: '#fff',
@@ -2697,72 +2184,50 @@ const styles = StyleSheet.create({
   barDay: { fontSize: 11, color: GREY, marginTop: 5, fontWeight: '600' },
   barDayToday: { color: BLUE, fontWeight: '800' },
 
-  // modals
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(15,23,42,0.5)',
-    justifyContent: 'center',
-    padding: 24,
+  // recent activity
+  sectionRow: { marginTop: 18, marginBottom: 12 },
+  sectionTitleInline: { fontSize: 17, fontWeight: '800', color: BLACK },
+  recentCard: {
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    paddingHorizontal: 14,
   },
-  modalCard: { backgroundColor: '#fff', borderRadius: 22, padding: 20 },
-  modalIcon: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: BLUE_LIGHT,
+  recentRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    alignSelf: 'center',
-    marginBottom: 10,
-  },
-  modalIconRed: { backgroundColor: '#FEE2E2' },
-  modalTitleCenter: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: BLACK,
-    textAlign: 'center',
-    marginBottom: 6,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 12,
-    padding: 12,
-    minHeight: 80,
-    textAlignVertical: 'top',
-    color: BLACK,
-    backgroundColor: BG,
-  },
-  modalRow: { flexDirection: 'row', marginTop: 16 },
-  modalBtn: {
-    flex: 1,
-    borderRadius: 14,
     paddingVertical: 13,
-    alignItems: 'center',
-    marginHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: BORDER,
   },
-  modalBtnGhost: { backgroundColor: BG },
-  modalBtnGhostText: { color: BLACK, fontWeight: '700' },
-  modalBtnText: { color: '#fff', fontWeight: '800' },
-
-  // start OTP
-  otpHint: {
-    fontSize: 13,
-    color: GREY,
-    marginBottom: 14,
-    lineHeight: 19,
-    textAlign: 'center',
-  },
-  otpInput: {
-    borderWidth: 1.5,
-    borderColor: BORDER,
+  noBorder: { borderBottomWidth: 0 },
+  recentIcon: {
+    width: 44,
+    height: 44,
     borderRadius: 14,
-    paddingVertical: 12,
-    textAlign: 'center',
-    fontSize: 30,
-    fontWeight: '800',
-    letterSpacing: 12,
-    color: BLACK,
-    backgroundColor: BG,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
   },
+  recentEmoji: { fontSize: 20 },
+  recentTitle: { fontSize: 15, fontWeight: '700', color: BLACK },
+  recentSub: { fontSize: 12, color: GREY, marginTop: 2 },
+  recentRight: { alignItems: 'flex-end' },
+  amount: { fontSize: 15, fontWeight: '800', color: BLACK },
+  chip: {
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    marginTop: 4,
+  },
+  chipText: { fontSize: 10, fontWeight: '800' },
+  emptyCard: {
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    paddingVertical: 22,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+  },
+  emptyEmoji: { fontSize: 40, marginBottom: 6 },
+  emptyTitle: { fontSize: 17, fontWeight: '800', color: BLACK },
+  emptySub: { fontSize: 13, color: GREY, textAlign: 'center', marginTop: 6 },
 });
