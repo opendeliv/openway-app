@@ -21,7 +21,6 @@ import { ridesApi } from './services/ridesApi';
 import { mapsApi, decodePolyline, Place, RouteInfo } from './services/mapsApi';
 import LocationPicker from './LocationPicker';
 import { VEHICLE_ICONS } from './constants/vehicleIcons';
-import { useHideTabBarOnScroll } from './components/AppTabBar';
 
 const BLUE = '#1F6FE5';
 const BLUE_DARK = '#1553B3';
@@ -43,9 +42,26 @@ const FIT_PAD_V = (MAP_H - SNAP_TOP) / 2;
 
 type Category = 'CAB' | 'BIKE' | 'PARCEL' | 'GOODS';
 
+// Ab app me sirf 2 mode hain: Parcel aur Goods (Ride / Passenger band hain)
+type Mode = 'parcel' | 'goods';
+
+const MODE_LABEL: Record<Mode, string> = { parcel: 'Parcel', goods: 'Goods' };
+const MODE_EMOJI: Record<Mode, string> = { parcel: '📦', goods: '🚚' };
+const MODE_CATEGORY: Record<Mode, Category> = { parcel: 'PARCEL', goods: 'GOODS' };
+
+// Home ka vehicle (bike / auto / cab / goods) -> kis mode me kaun se groups milenge
+const VEHICLE_MODES: Record<string, Partial<Record<Mode, string[]>>> = {
+  bike: { parcel: ['bike'] },
+  auto: { parcel: ['auto'], goods: ['auto'] },
+  cab: { parcel: ['cab'] },
+  goods: { goods: ['auto', 'truck'] },
+  // "Send now": sab parcel vehicles + Goods ek hi jagah
+  parcel: { parcel: ['walk', 'cycle', 'bike', 'auto', 'cab'] },
+};
+
 // Variant = the real vehicleType sent to the backend (id == backend vehicleType)
 type Variant = { id: string; name: string; emoji: string; sub: string; icon?: string };
-// Group = the top selector (Cab/Auto, Walk/Cycle/Bike/Auto/Cab, Auto/Truck ...)
+// Group = the top selector (Walk/Cycle/Bike/Auto/Cab, Auto/Truck ...)
 type Group = {
   id: string;
   name: string;
@@ -53,6 +69,8 @@ type Group = {
   sub: string;
   icon?: string;
   variants: Variant[];
+  // kisi group ko khud ka mode dena ho (e.g. combined list me Goods card)
+  mode?: Mode;
 };
 
 // ---------------------------------------------------------------------------
@@ -67,37 +85,24 @@ const bikeVariants = (sub?: string): Variant[] => [
 const autoVariants = (autoIcon: string, sub?: string): Variant[] => [
   { id: 'auto', name: 'Auto', emoji: '🛺', sub: sub ?? '3 seats', icon: autoIcon },
   { id: 'e_rickshaw', name: 'E-Auto', emoji: '🛺', sub: sub ?? 'Electric', icon: 'eauto' },
-  { id: 'shared_auto', name: 'Shared Auto', emoji: '🛺', sub: sub ?? 'Per seat', icon: 'shared' },
 ];
 
 const cabVariants = (sub?: string): Variant[] => [
-  { id: 'mini', name: 'Mini', emoji: '🚗', sub: sub ?? '4 seats' },
-  { id: 'sedan', name: 'Sedan', emoji: '🚙', sub: sub ?? '4 seats' },
-  { id: 'suv', name: 'SUV', emoji: '🚐', sub: sub ?? '6 seats' },
+  { id: 'mini_van', name: 'Mini Van', emoji: '🚐', sub: sub ?? '6 seats' },
+  { id: 'suv', name: 'SUV', emoji: '🚙', sub: sub ?? '6 seats' },
+  { id: 'utility_van', name: 'Utility Van', emoji: '🚐', sub: sub ?? 'Cargo space' },
 ];
 
-const CATALOG: Record<string, Group[]> = {
-  bike: [{ id: 'bike', name: 'Bike', emoji: '🏍️', sub: '', variants: bikeVariants() }],
+// Goods vehicles (truck group)
+const goodsTruckVariants = (): Variant[] => [
+  { id: 'tata_ace', name: 'Tata Ace', emoji: '🚚', sub: 'Upto 750 kg', icon: 'ace' },
+  { id: 'eicher', name: 'Eicher', emoji: '🚛', sub: 'Upto 2.5 ton', icon: 'eicher' },
+  { id: 'pickup', name: 'Pickup', emoji: '🛻', sub: 'Upto 1.5 ton', icon: 'pickup' },
+  { id: 'mahindra_furio', name: 'Mahindra Furio', emoji: '🚛', sub: 'Upto 5 ton', icon: 'furio' },
+];
 
-  cab: [
-    {
-      id: 'cab',
-      name: 'Cab',
-      emoji: '🚕',
-      sub: 'Mini, Sedan, SUV',
-      icon: 'group_cab',
-      variants: cabVariants(),
-    },
-    {
-      id: 'auto',
-      name: 'Auto',
-      emoji: '🛺',
-      sub: 'Auto, E-Auto, Shared',
-      icon: 'group_auto',
-      variants: autoVariants('auto'),
-    },
-  ],
-
+// Sirf parcel + goods (ride wale entries hata diye gaye hain)
+const CATALOG: Record<Mode, Group[]> = {
   parcel: [
     {
       id: 'walk',
@@ -154,40 +159,47 @@ const CATALOG: Record<string, Group[]> = {
       id: 'truck',
       name: 'Truck',
       emoji: '🚚',
-      sub: 'Tata Ace, Pickup',
+      sub: 'Tata Ace, Eicher, Pickup',
       icon: 'ace',
-      variants: [
-        { id: 'tata_ace', name: 'Tata Ace', emoji: '🚚', sub: 'Upto 750 kg', icon: 'ace' },
-        { id: 'pickup', name: 'Pickup', emoji: '🛻', sub: 'Upto 1.5 ton', icon: 'pickup' },
-      ],
+      variants: goodsTruckVariants(),
     },
   ],
+};
 
-  // Send to Someone (PARCEL category) - bike + auto
-  send: [
-    {
-      id: 'bike',
-      name: 'Bike',
-      emoji: '🏍️',
-      sub: 'Quick',
-      icon: 'pbike',
-      variants: bikeVariants('Quick'),
-    },
-    {
-      id: 'auto',
-      name: 'Auto',
-      emoji: '🛺',
-      sub: 'Bigger items',
-      icon: 'pauto',
-      variants: autoVariants('auto', 'Bigger items'),
-    },
+// Vehicle ke hisaab se groups (e.g. bike -> sirf Bike group)
+const getGroups = (vehicle: string, m: Mode): Group[] => {
+  const ids = VEHICLE_MODES[vehicle]?.[m];
+  const all = CATALOG[m] ?? [];
+  if (!ids) return all;
+  return all.filter((g) => ids.includes(g.id));
+};
+
+// "Send now" ki combined list: Walk, Cycle, Bike, Auto, Cab (parcel) + Goods
+const GOODS_COMBINED_GROUP: Group = {
+  id: 'goods',
+  name: 'Goods',
+  emoji: '🚚',
+  sub: 'Heavy items',
+  icon: 'ace',
+  mode: 'goods',
+  variants: [
+    { id: 'auto', name: 'Auto', emoji: '🛺', sub: 'Upto 300 kg', icon: 'gauto' },
+    { id: 'e_rickshaw', name: 'E-Auto', emoji: '🛺', sub: 'Upto 300 kg', icon: 'eauto' },
+    ...goodsTruckVariants(),
   ],
+};
+
+const getCombinedGroups = (allowed?: string[]): Group[] => {
+  const out: Group[] = [];
+  if (!allowed || allowed.includes('PARCEL')) out.push(...(CATALOG.parcel ?? []));
+  if (!allowed || allowed.includes('GOODS')) out.push(GOODS_COMBINED_GROUP);
+  return out;
 };
 
 // ---------------------------------------------------------------------------
 // FARE RATES (estimate). fare = max(minFare, baseFare + (km - baseKm) * perKm)
 // NOTE: the rates that were already in the app are unchanged. Rates for the new
-// variants (parcel cab: mini / sedan / suv) are my estimate - change them as needed.
+// variants (mini_van, utility_van, eicher, mahindra_furio) are my estimate - change them as needed.
 // ---------------------------------------------------------------------------
 type Rate = { baseFare: number; baseKm: number; perKm: number; minFare: number };
 const rate = (baseFare: number, baseKm: number, perKm: number): Rate => ({
@@ -204,12 +216,11 @@ const RATES: Record<Category, Record<string, Rate>> = {
     scooty: rate(22, 2, 6),
   },
   CAB: {
-    mini: rate(60, 2, 13),
-    sedan: rate(80, 2, 16),
+    mini_van: rate(90, 2, 15),
     suv: rate(110, 2, 20),
+    utility_van: rate(100, 2, 17),
     auto: rate(30, 1.5, 11),
     e_rickshaw: rate(25, 1.5, 9),
-    shared_auto: rate(15, 1.5, 5),
   },
   PARCEL: {
     walk: rate(25, 1.5, 5),
@@ -219,17 +230,17 @@ const RATES: Record<Category, Record<string, Rate>> = {
     scooty: rate(35, 2, 7),
     auto: rate(80, 2, 13),
     e_rickshaw: rate(70, 2, 12),
-    shared_auto: rate(50, 2, 8),
-    mini: rate(100, 2, 14),
-    sedan: rate(120, 2, 17),
+    mini_van: rate(110, 2, 15),
     suv: rate(150, 2, 21),
+    utility_van: rate(130, 2, 18),
   },
   GOODS: {
     auto: rate(150, 2, 15),
     e_rickshaw: rate(130, 2, 13),
-    shared_auto: rate(100, 2, 10),
     tata_ace: rate(300, 3, 20),
     pickup: rate(450, 3, 28),
+    eicher: rate(600, 3, 35),
+    mahindra_furio: rate(800, 3, 42),
   },
 };
 
@@ -246,24 +257,10 @@ const FARE_STEP = 5;
 const MIN_OFFER_RATIO = 0.7; // not below 70% of the estimate
 const MAX_OFFER_RATIO = 2; // not above 2x the estimate
 
-const TITLES: Record<string, string> = {
-  bike: 'Bike Ride',
-  cab: 'Cab Ride',
+const TITLES: Record<Mode, string> = {
   parcel: 'Parcel Delivery',
   goods: 'Goods Delivery',
-  send: 'Send to Someone',
 };
-
-// Home service -> backend category
-const SERVICE_CATEGORY: Record<string, Category> = {
-  bike: 'BIKE',
-  cab: 'CAB',
-  parcel: 'PARCEL',
-  goods: 'GOODS',
-  send: 'PARCEL',
-};
-
-const NEEDS_RECEIVER = ['parcel', 'goods', 'send'];
 
 // Parcel size based on the vehicle
 const getParcelSize = (vehicleId: string): 'SMALL' | 'MEDIUM' | 'LARGE' => {
@@ -277,7 +274,7 @@ const PHONE_REGEX = /^[6-9]\d{9}$/;
 // Pick an item -> a group + vehicle is suggested
 type Item = { id: string; label: string; emoji: string; groupId: string; vehicleId: string };
 
-const ITEMS: Record<string, Item[]> = {
+const ITEMS: Record<Mode, Item[]> = {
   parcel: [
     { id: 'docs', label: 'Documents', emoji: '📄', groupId: 'walk', vehicleId: 'walk' },
     { id: 'keys', label: 'Keys', emoji: '🔑', groupId: 'walk', vehicleId: 'walk' },
@@ -296,9 +293,9 @@ const ITEMS: Record<string, Item[]> = {
     { id: 'mattress', label: 'Mattress', emoji: '🛏️', groupId: 'auto', vehicleId: 'auto' },
     { id: 'appliance', label: 'Washing Machine / Fridge', emoji: '🧊', groupId: 'truck', vehicleId: 'tata_ace' },
     { id: 'furniture', label: 'Furniture', emoji: '🪑', groupId: 'truck', vehicleId: 'tata_ace' },
-    { id: 'shifting', label: 'Household Shifting', emoji: '🏠', groupId: 'truck', vehicleId: 'pickup' },
+    { id: 'shifting', label: 'Household Shifting', emoji: '🏠', groupId: 'truck', vehicleId: 'eicher' },
     { id: 'material', label: 'Construction Material', emoji: '🧱', groupId: 'truck', vehicleId: 'pickup' },
-    { id: 'bulk', label: 'Bulk Goods', emoji: '📦', groupId: 'truck', vehicleId: 'pickup' },
+    { id: 'bulk', label: 'Bulk Goods', emoji: '📦', groupId: 'truck', vehicleId: 'mahindra_furio' },
   ],
 };
 
@@ -340,8 +337,13 @@ const VehicleIcon = ({
 };
 
 type Props = {
+  // Home ka vehicle: 'bike' | 'auto' | 'cab' | 'goods'
   service: string;
+  // sirf ye categories allowed hain (e.g. ['PARCEL', 'GOODS']). Na do to sab allowed.
+  allowedCategories?: string[];
   onBack: () => void;
+  // Terms & Conditions par tap karne par (parent PrivacyPolicyScreen kholta hai)
+  onOpenTerms?: () => void;
   // called when the ride is created, the parent shows RideTrackingScreen
   onRideCreated: (rideId: string) => void;
   // when coming from Home, pickup / drop are already filled
@@ -351,24 +353,45 @@ type Props = {
 
 export default function BookingScreen({
   service,
+  allowedCategories,
   onBack,
+  onOpenTerms,
   onRideCreated,
   initialPickup,
   initialDrop,
 }: Props) {
-   const hideTabBar = useHideTabBarOnScroll();
-  const isCab = service === 'cab';
-  const needsReceiver = NEEDS_RECEIVER.includes(service);
-  const category = SERVICE_CATEGORY[service];
+  const vehicle = service;
+  const needsReceiver = true; // ab sirf parcel / goods hain, receiver hamesha chahiye
+
+  // Is vehicle ke liye kaun se modes (Parcel / Goods) allowed hain
+  // "Send now" (vehicle = 'parcel'): sab vehicles ek hi list me, tabs nahi
+  const combined = vehicle === 'parcel';
+  const modes: Mode[] = combined
+    ? []
+    : (['parcel', 'goods'] as Mode[]).filter(
+        (m) =>
+          !!VEHICLE_MODES[vehicle]?.[m] &&
+          (!allowedCategories || allowedCategories.includes(MODE_CATEGORY[m])),
+      );
+  const [mode, setMode] = useState<Mode>(modes[0] ?? 'parcel');
 
   // Group (top selector) + Variant (real vehicleType)
-  const groups = CATALOG[service] ?? [];
+  const groups = combined ? getCombinedGroups(allowedCategories) : getGroups(vehicle, mode);
   const [groupId, setGroupId] = useState<string | undefined>(groups[0]?.id);
   const group = groups.find((g) => g.id === groupId) ?? groups[0];
   const [selectedId, setSelectedId] = useState<string | undefined>(groups[0]?.variants[0]?.id);
   const selected = group?.variants.find((v) => v.id === selectedId) ?? group?.variants[0];
 
-  const items = ITEMS[service] ?? [];
+  // Asli mode: combined list me group batata hai (Goods card = goods), warna tab wala mode
+  const activeMode: Mode = group?.mode ?? mode;
+  const category = MODE_CATEGORY[activeMode];
+
+  // Sirf wahi items jo is vehicle ke groups me aate hain
+  const items: Item[] = combined
+    ? activeMode === 'goods'
+      ? ITEMS.goods.map((it) => ({ ...it, groupId: 'goods' }))
+      : ITEMS.parcel
+    : (ITEMS[mode] ?? []).filter((it) => groups.some((g) => g.id === it.groupId));
   const [itemId, setItemId] = useState<string | null>(null);
 
   // Parcel / goods details
@@ -382,6 +405,9 @@ export default function BookingScreen({
   const [profileLoading, setProfileLoading] = useState(false);
 
   const [booking, setBooking] = useState(false);
+
+  // Captain ko payment kahan karni hai: pickup par ya drop par
+  const [payAt, setPayAt] = useState<'pickup' | 'drop'>('drop');
 
   const [pickup, setPickup] = useState<Place>(initialPickup ?? DEFAULT_PICKUP);
   const [drop, setDrop] = useState<Place | null>(initialDrop ?? null);
@@ -487,7 +513,7 @@ export default function BookingScreen({
   // reset the offer when the vehicle or route changes (a new estimate comes)
   useEffect(() => {
     setOfferFare(null);
-  }, [selected?.id, route?.distanceKm]);
+  }, [selected?.id, route?.distanceKm, activeMode]);
 
   const changeFare = (delta: number) => {
     if (finalFare == null || minOffer == null || maxOffer == null) return;
@@ -509,7 +535,10 @@ export default function BookingScreen({
     return () => clearTimeout(t);
   }, []);
 
-  // get the route again when pickup / drop / service changes
+  const routeMode =
+    vehicle === 'bike' || (combined && group?.id === 'bike') ? 'TWO_WHEELER' : 'DRIVE';
+
+  // get the route again when pickup / drop / vehicle changes
   useEffect(() => {
     if (!drop) {
       setRoute(null);
@@ -520,7 +549,7 @@ export default function BookingScreen({
     setRouteLoading(true);
 
     mapsApi
-      .route(pickup, drop, service === 'bike' ? 'TWO_WHEELER' : 'DRIVE')
+      .route(pickup, drop, routeMode)
       .then((r) => {
         if (!cancelled) setRoute(r);
       })
@@ -537,7 +566,7 @@ export default function BookingScreen({
     return () => {
       cancelled = true;
     };
-  }, [pickup, drop, service]);
+  }, [pickup, drop, routeMode]);
 
   // fit the map to the route / markers (visible patti ke andar)
   useEffect(() => {
@@ -579,6 +608,17 @@ export default function BookingScreen({
       needsReceiver && !PHONE_REGEX.test(receiverPhone)
         ? 'Enter a valid 10 digit mobile number'
         : '',
+  };
+
+  // Parcel <-> Goods badalna
+  const onModePress = (m: Mode) => {
+    if (m === mode) return;
+    const gs = getGroups(vehicle, m);
+    setMode(m);
+    setGroupId(gs[0]?.id);
+    setSelectedId(gs[0]?.variants[0]?.id);
+    setItemId(null);
+    setParcelDescription('');
   };
 
   const onItemPress = (item: Item) => {
@@ -678,15 +718,14 @@ export default function BookingScreen({
         duration: route.durationMinutes,
 
         // sender (name + phone) is filled by the backend from the logged-in user's profile.
-        // receiver + order details are sent only for parcel / goods.
-        ...(needsReceiver
-          ? {
-              receiverName: receiverName.trim(),
-              receiverPhone,
-              parcelSize: getParcelSize(selected.id),
-              parcelDescription: parcelDescription.trim(),
-            }
-          : {}),
+        // receiver + order details are sent for parcel / goods.
+        receiverName: receiverName.trim(),
+        receiverPhone,
+        parcelSize: getParcelSize(selected.id),
+        parcelDescription: parcelDescription.trim(),
+
+        // payment kahan hogi (backend field naam alag ho to yaha badlo)
+        payAt: payAt === 'pickup' ? 'PICKUP' : 'DROP',
       });
 
       // open the tracking screen
@@ -736,14 +775,6 @@ export default function BookingScreen({
 
   const showGroups = groups.length > 1;
   const showVariants = !!group && group.variants.length > 1;
-
-  const variantsTitle = isCab
-    ? group?.id === 'cab'
-      ? 'Choose a cab'
-      : 'Choose an auto'
-    : needsReceiver
-      ? 'Choose a vehicle'
-      : 'Choose a ride';
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -812,7 +843,7 @@ export default function BookingScreen({
             <Ionicons name="arrow-back" size={22} color={BLACK} />
           </TouchableOpacity>
           <View style={styles.titlePill}>
-            <Text style={styles.titleText}>{TITLES[service]}</Text>
+            <Text style={styles.titleText}>{TITLES[activeMode]}</Text>
           </View>
         </View>
 
@@ -859,9 +890,30 @@ export default function BookingScreen({
             scrollEventThrottle={16}
             onScroll={(e) => {
               scrollY.current = e.nativeEvent.contentOffset.y;
-              hideTabBar(e);  
             }}
           >
+            {/* Parcel / Goods tabs (sirf tab dikhte hain jab dono allowed hon) */}
+            {modes.length > 1 && (
+              <View style={styles.modeRow}>
+                {modes.map((m) => {
+                  const active = m === mode;
+                  return (
+                    <TouchableOpacity
+                      key={m}
+                      activeOpacity={0.85}
+                      onPress={() => onModePress(m)}
+                      style={[styles.modeTab, active && styles.modeTabActive]}
+                    >
+                      <Text style={styles.modeEmoji}>{MODE_EMOJI[m]}</Text>
+                      <Text style={[styles.modeText, active && styles.modeTextActive]}>
+                        {MODE_LABEL[m]}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
             {/* Locations (timeline) */}
             <View style={styles.locCard}>
               <View style={styles.timeline}>
@@ -877,9 +929,7 @@ export default function BookingScreen({
                   onPress={() => setPicking('pickup')}
                 >
                   <View style={styles.flex}>
-                    <Text style={styles.locLabel}>
-                      {needsReceiver ? 'PICKUP PARCEL FROM' : 'PICKUP'}
-                    </Text>
+                    <Text style={styles.locLabel}>PICKUP PARCEL FROM</Text>
                     <Text style={styles.locValue} numberOfLines={1}>
                       {pickup.address}
                     </Text>
@@ -895,7 +945,7 @@ export default function BookingScreen({
                   onPress={() => setPicking('drop')}
                 >
                   <View style={styles.flex}>
-                    <Text style={styles.locLabel}>{needsReceiver ? 'DELIVER TO' : 'DROP'}</Text>
+                    <Text style={styles.locLabel}>DELIVER TO</Text>
                     <Text
                       style={[styles.locValue, !drop && styles.locPlaceholder]}
                       numberOfLines={1}
@@ -908,7 +958,7 @@ export default function BookingScreen({
               </View>
             </View>
 
-            {/* Group selector (Cab/Auto, Walk/Cycle/Bike/Auto/Cab, Auto/Truck) */}
+            {/* Group selector (Walk/Cycle/Bike/Auto/Cab, Auto/Truck) */}
             {showGroups &&
               (groups.length <= 2 ? (
                 <View style={styles.gRow}>{groups.map((g) => renderGroupCard(g, false))}</View>
@@ -926,7 +976,7 @@ export default function BookingScreen({
             {/* Vehicle categories (only when the group has more than one option) */}
             {showVariants && group && (
               <>
-                <Text style={styles.sectionTitle}>{variantsTitle}</Text>
+                <Text style={styles.sectionTitle}>Choose a vehicle</Text>
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
@@ -1042,13 +1092,17 @@ export default function BookingScreen({
               </>
             )}
 
-            {/* Parcel description + receiver (parcel / goods / send) */}
+            {/* Parcel description + receiver */}
             {needsReceiver && (
               <>
                 {/* Parcel description */}
-                <Text style={[styles.sectionTitle, styles.itemsTitle]}>Parcel details</Text>
+                <Text style={[styles.sectionTitle, styles.itemsTitle]}>
+                  {activeMode === 'goods' ? 'Goods details' : 'Parcel details'}
+                </Text>
                 <View style={styles.receiverCard}>
-                  <Text style={styles.inputLabel}>Describe your parcel</Text>
+                  <Text style={styles.inputLabel}>
+                    {activeMode === 'goods' ? 'Describe your goods' : 'Describe your parcel'}
+                  </Text>
                   <View
                     style={[
                       styles.inputWrap,
@@ -1152,6 +1206,18 @@ export default function BookingScreen({
                     </View>
                   </TouchableOpacity>
                 </View>
+
+                {/* Terms & Conditions (receiver section ke neeche) */}
+                <TouchableOpacity
+                  style={styles.termsRow}
+                  activeOpacity={0.7}
+                  onPress={onOpenTerms}
+                >
+                  <Text style={styles.termsText}>
+                    By ordering, you agree to our{' '}
+                    <Text style={styles.termsLink}>Terms & Conditions</Text>
+                  </Text>
+                </TouchableOpacity>
               </>
             )}
           </ScrollView>
@@ -1161,8 +1227,28 @@ export default function BookingScreen({
       {/* Book bar */}
       <View style={styles.footer}>
         <View style={styles.payRow}>
-          <Ionicons name="wallet-outline" size={16} color={GREY} />
-          <Text style={styles.payText}>Pay the captain after the ride</Text>
+          <Ionicons name="wallet-outline" size={14} color={GREY} />
+          <Text style={styles.payText}>Pay at</Text>
+          {(['pickup', 'drop'] as const).map((k) => {
+            const active = payAt === k;
+            return (
+              <TouchableOpacity
+                key={k}
+                activeOpacity={0.85}
+                onPress={() => setPayAt(k)}
+                style={[styles.payChip, active && styles.payChipActive]}
+              >
+                <Ionicons
+                  name={active ? 'radio-button-on' : 'radio-button-off'}
+                  size={12}
+                  color={active ? BLUE : GREY}
+                />
+                <Text style={[styles.payChipText, active && styles.payChipTextActive]}>
+                  {k === 'pickup' ? 'Pickup' : 'Drop'}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
         <TouchableOpacity
@@ -1175,9 +1261,7 @@ export default function BookingScreen({
             <ActivityIndicator color="#fff" />
           ) : (
             <>
-              <Text style={styles.bookText}>
-                {service === 'cab' || service === 'bike' ? 'Order Ride' : 'Order Now'}
-              </Text>
+              <Text style={styles.bookText}>Order Now</Text>
               {finalFare != null && (
                 <View style={styles.bookFare}>
                   <Text style={styles.bookFareText}>₹{finalFare}</Text>
@@ -1252,9 +1336,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   backBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1267,8 +1351,8 @@ const styles = StyleSheet.create({
   titlePill: {
     backgroundColor: '#fff',
     borderRadius: 999,
-    paddingVertical: 10,
-    paddingHorizontal: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
     marginLeft: 10,
     elevation: 4,
     shadowColor: BLACK,
@@ -1302,15 +1386,43 @@ const styles = StyleSheet.create({
     marginTop: 8,
     marginBottom: 6,
   },
-  scroll: { padding: 16, paddingBottom: 24 },
+  scroll: { padding: 14, paddingBottom: 20 },
+
+  // Parcel / Goods tabs
+  modeRow: {
+    flexDirection: 'row',
+    backgroundColor: '#E8EEF7',
+    borderRadius: 14,
+    padding: 4,
+    marginBottom: 12,
+  },
+  modeTab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    borderRadius: 11,
+  },
+  modeTabActive: {
+    backgroundColor: '#fff',
+    elevation: 2,
+    shadowColor: BLACK,
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+  },
+  modeEmoji: { fontSize: 16, marginRight: 6 },
+  modeText: { fontSize: 14, fontWeight: '700', color: GREY },
+  modeTextActive: { color: BLUE },
 
   // locations (timeline)
   locCard: {
     flexDirection: 'row',
     backgroundColor: '#fff',
     borderRadius: 18,
-    paddingHorizontal: 14,
-    marginBottom: 20,
+    paddingHorizontal: 12,
+    marginBottom: 14,
     elevation: 3,
     shadowColor: BLACK,
     shadowOpacity: 0.07,
@@ -1320,8 +1432,8 @@ const styles = StyleSheet.create({
   timeline: {
     width: 18,
     alignItems: 'center',
-    paddingTop: 24,
-    paddingBottom: 24,
+    paddingTop: 18,
+    paddingBottom: 18,
     marginRight: 10,
   },
   pickupDot: {
@@ -1334,23 +1446,23 @@ const styles = StyleSheet.create({
   },
   timelineLine: { flex: 1, width: 2, backgroundColor: BORDER, marginVertical: 4 },
   dropSquare: { width: 12, height: 12, borderRadius: 3, backgroundColor: RED },
-  locRow: { height: 60, flexDirection: 'row', alignItems: 'center' },
+  locRow: { height: 52, flexDirection: 'row', alignItems: 'center' },
   locLabel: { fontSize: 10, fontWeight: '700', color: GREY, letterSpacing: 0.8 },
-  locValue: { fontSize: 15, fontWeight: '600', color: BLACK, marginTop: 3 },
+  locValue: { fontSize: 14, fontWeight: '600', color: BLACK, marginTop: 2 },
   locPlaceholder: { color: '#94A3B8', fontWeight: '500' },
   divider: { height: 1, backgroundColor: BORDER },
 
   // vehicles
-  sectionTitle: { fontSize: 17, fontWeight: '800', color: BLACK, marginBottom: 12 },
+  sectionTitle: { fontSize: 16, fontWeight: '800', color: BLACK, marginBottom: 8 },
   vRow: { paddingRight: 8, paddingBottom: 6 },
   vCard: {
-    width: 112,
+    width: 100,
     backgroundColor: '#fff',
     borderRadius: 18,
     borderWidth: 2,
     borderColor: 'transparent',
-    padding: 12,
-    marginRight: 10,
+    padding: 9,
+    marginRight: 8,
     alignItems: 'center',
     elevation: 2,
     shadowColor: BLACK,
@@ -1360,23 +1472,23 @@ const styles = StyleSheet.create({
   },
   vCardActive: { borderColor: BLUE, backgroundColor: BLUE_LIGHT },
   checkBadge: { position: 'absolute', top: 6, right: 6, zIndex: 2 },
-  vEmoji: { fontSize: 32, marginBottom: 6 },
-  vImg: { width: 72, height: 44, marginBottom: 6 },
-  vName: { fontSize: 15, fontWeight: '800', color: BLACK },
-  vSub: { fontSize: 11, color: GREY, marginTop: 2 },
-  vPrice: { fontSize: 15, fontWeight: '800', color: BLACK, marginTop: 8 },
+  vEmoji: { fontSize: 28, marginBottom: 4 },
+  vImg: { width: 62, height: 38, marginBottom: 4 },
+  vName: { fontSize: 14, fontWeight: '800', color: BLACK },
+  vSub: { fontSize: 10, color: GREY, marginTop: 1 },
+  vPrice: { fontSize: 14, fontWeight: '800', color: BLACK, marginTop: 5 },
   vPriceHint: { fontSize: 12, fontWeight: '500', color: GREY },
 
   // group selector
-  gRow: { flexDirection: 'row', marginBottom: 18 },
-  gScrollWrap: { marginBottom: 18, flexGrow: 0 },
+  gRow: { flexDirection: 'row', marginBottom: 12 },
+  gScrollWrap: { marginBottom: 12, flexGrow: 0 },
   gCard: {
     flex: 1,
     backgroundColor: '#fff',
     borderRadius: 18,
     borderWidth: 2,
     borderColor: 'transparent',
-    paddingVertical: 14,
+    paddingVertical: 10,
     marginHorizontal: 5,
     alignItems: 'center',
     elevation: 2,
@@ -1385,19 +1497,19 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
   },
-  gCardFixed: { flex: 0, width: 116, marginHorizontal: 0, marginRight: 10 },
+  gCardFixed: { flex: 0, width: 100, marginHorizontal: 0, marginRight: 8 },
   gCardActive: { borderColor: BLUE, backgroundColor: BLUE_LIGHT },
-  gEmoji: { fontSize: 34, marginBottom: 6 },
-  gImg: { width: 80, height: 48, marginBottom: 6 },
-  gName: { fontSize: 16, fontWeight: '800', color: BLACK },
-  gSub: { fontSize: 11, color: GREY, marginTop: 2, textAlign: 'center' },
+  gEmoji: { fontSize: 28, marginBottom: 4 },
+  gImg: { width: 66, height: 40, marginBottom: 4 },
+  gName: { fontSize: 14, fontWeight: '800', color: BLACK },
+  gSub: { fontSize: 10, color: GREY, marginTop: 1, textAlign: 'center' },
 
   // fare offer card
   fareCard: {
     backgroundColor: '#fff',
     borderRadius: 18,
-    padding: 16,
-    marginTop: 18,
+    padding: 12,
+    marginTop: 12,
     elevation: 2,
     shadowColor: BLACK,
     shadowOpacity: 0.06,
@@ -1406,43 +1518,43 @@ const styles = StyleSheet.create({
   },
   fareHead: { flexDirection: 'row', alignItems: 'center' },
   fareHeadIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
     backgroundColor: BLUE_LIGHT,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 10,
   },
-  fareTitle: { fontSize: 16, fontWeight: '800', color: BLACK },
+  fareTitle: { fontSize: 15, fontWeight: '800', color: BLACK },
   fareHint: { fontSize: 12, color: GREY, marginTop: 2 },
   fareReset: { fontSize: 13, fontWeight: '800', color: BLUE },
   fareRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 16,
+    marginTop: 10,
   },
   fareBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: BLUE_LIGHT,
     alignItems: 'center',
     justifyContent: 'center',
   },
   fareBtnOff: { opacity: 0.35 },
   fareValue: {
-    minWidth: 130,
+    minWidth: 110,
     textAlign: 'center',
-    fontSize: 34,
+    fontSize: 28,
     fontWeight: '800',
     color: BLACK,
   },
   fareMetaRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginTop: 14,
+    marginTop: 10,
   },
   fareMetaChip: {
     backgroundColor: BG,
@@ -1454,8 +1566,8 @@ const styles = StyleSheet.create({
   fareMetaText: { fontSize: 12, fontWeight: '600', color: GREY },
 
   // items
-  itemsTitle: { marginTop: 22, marginBottom: 4 },
-  itemsHint: { fontSize: 12, color: GREY, marginBottom: 12 },
+  itemsTitle: { marginTop: 16, marginBottom: 4 },
+  itemsHint: { fontSize: 11, color: GREY, marginBottom: 8 },
   chipWrap: { flexDirection: 'row', flexWrap: 'wrap' },
   chip: {
     flexDirection: 'row',
@@ -1464,38 +1576,38 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1.5,
     borderColor: BORDER,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginRight: 8,
-    marginBottom: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    marginRight: 6,
+    marginBottom: 6,
   },
   chipActive: { borderColor: BLUE, backgroundColor: BLUE_LIGHT },
-  chipEmoji: { fontSize: 16, marginRight: 6 },
-  chipText: { fontSize: 13, fontWeight: '600', color: BLACK },
+  chipEmoji: { fontSize: 14, marginRight: 5 },
+  chipText: { fontSize: 12, fontWeight: '600', color: BLACK },
   chipTextActive: { color: BLUE },
 
   // inputs
-  receiverCard: { backgroundColor: '#fff', borderRadius: 18, padding: 14 },
-  inputLabel: { fontSize: 13, fontWeight: '700', color: BLACK, marginBottom: 8 },
-  inputGap: { marginTop: 14 },
+  receiverCard: { backgroundColor: '#fff', borderRadius: 18, padding: 12 },
+  inputLabel: { fontSize: 12, fontWeight: '700', color: BLACK, marginBottom: 6 },
+  inputGap: { marginTop: 10 },
   inputWrap: {
     flexDirection: 'row',
     alignItems: 'center',
-    height: 50,
+    height: 44,
     borderWidth: 1.5,
     borderColor: BORDER,
     borderRadius: 12,
     paddingHorizontal: 12,
     backgroundColor: BG,
   },
-  inputWrapMulti: { height: 86, alignItems: 'flex-start' },
+  inputWrapMulti: { height: 70, alignItems: 'flex-start' },
   inputIcon: { marginRight: 10 },
-  inputIconTop: { marginRight: 10, marginTop: 13 },
+  inputIconTop: { marginRight: 10, marginTop: 11 },
   phonePrefix: { fontSize: 15, fontWeight: '700', color: BLACK, marginRight: 8 },
-  input: { flex: 1, fontSize: 15, color: BLACK, paddingVertical: 0 },
+  input: { flex: 1, fontSize: 14, color: BLACK, paddingVertical: 0 },
   inputMulti: {
-    height: 80,
-    paddingTop: 12,
+    height: 64,
+    paddingTop: 10,
     textAlignVertical: 'top',
   },
   inputLocked: { backgroundColor: BLUE_LIGHT, borderColor: BLUE },
@@ -1506,8 +1618,8 @@ const styles = StyleSheet.create({
   tickRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 16,
-    paddingTop: 14,
+    marginTop: 12,
+    paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: BORDER,
   },
@@ -1523,14 +1635,22 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   tickBoxOn: { backgroundColor: BLUE, borderColor: BLUE },
+  termsRow: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+    paddingVertical: 4,
+  },
+  termsText: { fontSize: 11, color: GREY, textAlign: 'center' },
+  termsLink: { color: BLUE, fontWeight: '700', textDecorationLine: 'underline' },
   tickText: { fontSize: 14, fontWeight: '700', color: BLACK },
   tickSub: { fontSize: 12, color: GREY, marginTop: 2 },
 
   // footer
   footer: {
     paddingHorizontal: 16,
-    paddingTop: 10,
-    paddingBottom: 12,
+    paddingTop: 6,
+    paddingBottom: 8,
     backgroundColor: '#fff',
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
@@ -1544,12 +1664,26 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 10,
+    marginBottom: 5,
   },
-  payText: { fontSize: 12, color: GREY, fontWeight: '600', marginLeft: 6 },
+  payText: { fontSize: 11, color: GREY, fontWeight: '600', marginLeft: 5, marginRight: 6 },
+  payChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 999,
+    paddingVertical: 2,
+    paddingHorizontal: 8,
+    marginHorizontal: 2,
+    backgroundColor: '#fff',
+  },
+  payChipActive: { borderColor: BLUE, backgroundColor: BLUE_LIGHT },
+  payChipText: { fontSize: 11, fontWeight: '700', color: GREY, marginLeft: 4 },
+  payChipTextActive: { color: BLUE },
   bookBtn: {
-    height: 54,
-    borderRadius: 16,
+    height: 46,
+    borderRadius: 14,
     backgroundColor: BLUE,
     flexDirection: 'row',
     alignItems: 'center',

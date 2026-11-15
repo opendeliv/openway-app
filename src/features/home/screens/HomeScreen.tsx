@@ -8,10 +8,8 @@ import {
   View,
   ScrollView,
   StatusBar,
-  BackHandler,
   PermissionsAndroid,
   Platform,
-  Image,
   Animated,
   PanResponder,
   Dimensions,
@@ -24,13 +22,11 @@ import Ionicons from 'react-native-vector-icons/Ionicons';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useHideTabBarOnScroll } from '../../../components/AppTabBar';
-import BookingScreen from '../../../BookingScreen';
 import LocationPicker from '../../../LocationPicker';
 import { Place } from '../../../services/mapsApi';
 import { RootStackParamList } from '../../../types/navigation';
 // Backend wala axios instance (token header ke saath) - captain wala hi
 import api from '../../../services/CaptainaRideApi';
-import { RAPTR_LOGO } from '../../../image/logoBase64';
 
 // Palette (blue theme)
 const BLUE = '#1F6FE5';
@@ -44,13 +40,13 @@ const GREEN_DARK = '#15803D';
 const RED = '#EF4444';
 const BORDER = '#E2E8F0';
 
-// ---------- Map + bottom sheet (Rapido style) ----------
+// ---------- Map + bottom sheet ----------
 const SCREEN_H = Dimensions.get('window').height;
-const SNAP_TOP = SCREEN_H * 0.2; // default: map chhota (sirf upar ki patti), sheet bada
+const SNAP_TOP = SCREEN_H * 0.2; // default: map sirf upar ki chhoti patti, sheet bada
 const SNAP_HALF = SCREEN_H * 0.5; // neeche kheencho: map aadha
 const MAP_H = SNAP_HALF + 40; // map ki fixed height (sheet ke peeche tak)
 const MAP_ZOOM = 0.006; // chhota number = zyada zoom
-const PIN_H = 62; // center pin ki total height (label + stem + dot)
+const PIN_H = 32; // center pin ki height (stem + dot)
 
 type Service = {
   id: string;
@@ -66,10 +62,13 @@ const FALLBACK_PICKUP: Place = {
   longitude: 77.4326,
 };
 
-// Phone me last location yaha save hoti hai
+// Phone me save hone wali keys
 const LOC_KEY = 'user_last_location';
+const RECENT_KEY = 'user_recent_searches';
+const FAV_KEY = 'user_fav_places';
+const RECENT_SEARCH_LIMIT = 3;
 
-// Address backend se: GET /maps/reverse?lat=&lng= (captain home jaisa)
+// Address backend se: GET /maps/reverse?lat=&lng=
 const reverseGeocode = async (latitude: number, longitude: number): Promise<string> => {
   try {
     const res = await api.get<{ address: string }>('/maps/reverse', {
@@ -124,17 +123,16 @@ const getPosition = () =>
     );
   });
 
-const greeting = () => {
-  const h = new Date().getHours();
-  if (h < 12) return 'Good morning';
-  if (h < 17) return 'Good afternoon';
-  return 'Good evening';
+// "DB Mall, Maharana Pratap Nagar, Bhopal" -> { name: "DB Mall", sub: "Maharana Pratap Nagar, Bhopal" }
+const splitAddress = (address: string) => {
+  const [first, ...rest] = address.split(',');
+  return { name: first.trim(), sub: rest.join(',').trim() };
 };
 
 const SERVICES: Service[] = [
   { id: 'bike', title: 'Bike', emoji: '🏍️', tint: '#DDF5E6' },
-  { id: 'cab', title: 'Cab', emoji: '🚕', tint: '#FFF3C4' },
-  { id: 'parcel', title: 'Parcel', emoji: '📦', tint: '#FFE4D6' },
+  { id: 'auto', title: 'Auto', emoji: '🛺', tint: '#FFF3C4' },
+  { id: 'cab', title: 'Cab', emoji: '🚕', tint: '#DBEAFE' },
   { id: 'goods', title: 'Goods', emoji: '🚚', tint: '#EADFFB' },
 ];
 
@@ -145,7 +143,6 @@ const WHY_RAPTOR = [
 ];
 
 // ---------- Recent activity (real rides from backend) ----------
-// Backend: user ki apni rides (naya pehle). Naam alag ho to yaha badlo.
 const MY_RIDES_URL = '/rides/my';
 
 // Home pe kitni rides dikhani hain
@@ -154,7 +151,7 @@ const RECENT_LIMIT = 3;
 // Ye statuses "live" ride hain: tap par tracking khulni chahiye
 const ACTIVE_STATUSES = ['REQUESTED', 'ACCEPTED', 'ARRIVING', 'ARRIVED', 'STARTED'];
 
-// Itni purani ride ko "live" nahi maanenge (backend me atki hui purani ride galat na khule)
+// Itni purani ride ko "live" nahi maanenge
 const ACTIVE_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 3 ghante
 
 type UserRide = {
@@ -236,7 +233,6 @@ const timeAgo = (iso?: string | null) => {
 export default function HomeScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const hideTabBar = useHideTabBarOnScroll();
-  const [selectedService, setSelectedService] = useState<string | null>(null);
 
   // Trip: pickup (auto live location, change ho sakta hai) + drop (search bar se)
   const [pickup, setPickup] = useState<Place | null>(null);
@@ -247,6 +243,10 @@ export default function HomeScreen() {
 
   // user ne pickup khud badla ho to auto-location usse overwrite na kare
   const manualPickup = useRef(false);
+
+  // Recent searched locations + favourites
+  const [recentPlaces, setRecentPlaces] = useState<Place[]>([]);
+  const [favs, setFavs] = useState<string[]>([]); // favourite places ke address
 
   // Recent activity: backend se asli rides
   const [recentRides, setRecentRides] = useState<UserRide[]>([]);
@@ -262,7 +262,7 @@ export default function HomeScreen() {
   const mapRef = useRef<MapView>(null);
   const [mapExpanded, setMapExpanded] = useState(false); // true = map aadha
 
-  // Rapido-style pickup pin (pin fixed, map khiskta hai)
+  // Pickup pin (pin fixed, map khiskta hai)
   const dragging = useRef(false); // user ne map haath se khiyncha
   const fromMap = useRef(false); // pickup map drag se aaya
   const geoReq = useRef(0); // purani address request ignore karne ke liye
@@ -281,6 +281,41 @@ export default function HomeScreen() {
     });
     return () => sheetTop.removeListener(id);
   }, [sheetTop]);
+
+  // Saved recent searches + favourites load karo
+  useEffect(() => {
+    AsyncStorage.getItem(RECENT_KEY)
+      .then((v) => {
+        if (v) setRecentPlaces(JSON.parse(v));
+      })
+      .catch(() => {});
+    AsyncStorage.getItem(FAV_KEY)
+      .then((v) => {
+        if (v) setFavs(JSON.parse(v));
+      })
+      .catch(() => {});
+  }, []);
+
+  const addRecentPlace = (p: Place) => {
+    setRecentPlaces((cur) => {
+      const next = [p, ...cur.filter((x) => x.address !== p.address)].slice(
+        0,
+        RECENT_SEARCH_LIMIT,
+      );
+      AsyncStorage.setItem(RECENT_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  };
+
+  const toggleFav = (address: string) => {
+    setFavs((cur) => {
+      const next = cur.includes(address)
+        ? cur.filter((a) => a !== address)
+        : [...cur, address];
+      AsyncStorage.setItem(FAV_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
+  };
 
   const snapTo = (half: boolean) => {
     setMapExpanded(half);
@@ -330,7 +365,7 @@ export default function HomeScreen() {
     }),
   ).current;
 
-  // map ka center hamesha visible hisse ke beech me rahe (live location chhupe nahi)
+  // map ka center hamesha visible hisse ke beech me rahe
   const mapTranslateY = sheetTop.interpolate({
     inputRange: [SNAP_TOP, SNAP_HALF],
     outputRange: [(SNAP_TOP - MAP_H) / 2, (SNAP_HALF - MAP_H) / 2],
@@ -471,6 +506,7 @@ export default function HomeScreen() {
       saveLocation(place);
     } else if (picking === 'drop') {
       setDrop(place);
+      addRecentPlace(place);
     }
     setPicking(null);
   };
@@ -494,7 +530,12 @@ export default function HomeScreen() {
 
   const onServicePress = (id: string) => {
     if (blockedByActiveRide()) return;
-    setSelectedService(id);
+    // Booking root stack screen hai, isliye neeche ka tab bar apne aap hide rehta hai
+    navigation.navigate('Booking', {
+      service: id,
+      pickup: pickup ?? FALLBACK_PICKUP,
+      drop,
+    });
   };
 
   const openPicker = (which: 'pickup' | 'drop') => {
@@ -502,31 +543,8 @@ export default function HomeScreen() {
     setPicking(which);
   };
 
-  // Phone ka back button: booking screen se Home par wapas aaye, app band na ho
-  useEffect(() => {
-    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (selectedService) {
-        setSelectedService(null);
-        return true;
-      }
-      return false;
-    });
-    return () => sub.remove();
-  }, [selectedService]);
-
-  if (selectedService) {
-    return (
-      <BookingScreen
-        service={selectedService}
-        onBack={() => setSelectedService(null)}
-        initialPickup={pickup ?? FALLBACK_PICKUP}
-        initialDrop={drop}
-        onRideCreated={(rideId) => navigation.navigate('RideTracking', { rideId })}
-      />
-    );
-  }
-
   const mapStart = pickup ?? FALLBACK_PICKUP;
+  const pickupLoading = (locLoading && !pickup) || addrLoading;
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -570,9 +588,6 @@ export default function HomeScreen() {
               pinLifted && styles.centerPinLifted,
             ]}
           >
-            <View style={styles.mapPinLabel}>
-              <Text style={styles.mapPinLabelText}>Pickup Point</Text>
-            </View>
             <View style={styles.mapPinStem} />
             <View style={styles.mapPinDotOuter}>
               <View style={styles.mapPinDotInner} />
@@ -580,15 +595,30 @@ export default function HomeScreen() {
           </View>
         </Animated.View>
 
-        {/* Top bar: RAPTR logo + bell (map ke upar) */}
-        <View style={styles.topBar} pointerEvents="box-none">
-          <Image source={{ uri: RAPTR_LOGO }} style={styles.logo} resizeMode="contain" />
+        {/* Bell (map ke upar, pill ke saath) */}
+        <TouchableOpacity style={styles.bell} activeOpacity={0.8}>
+          <Ionicons name="notifications-outline" size={20} color={BLACK} />
+          <View style={styles.bellDot} />
+        </TouchableOpacity>
 
-          <TouchableOpacity style={styles.bell} activeOpacity={0.8}>
-            <Ionicons name="notifications-outline" size={22} color={BLACK} />
-            <View style={styles.bellDot} />
-          </TouchableOpacity>
-        </View>
+        {/* Pickup address pill (map ke upar) */}
+        <TouchableOpacity
+          style={styles.pickupPill}
+          activeOpacity={0.85}
+          onPress={() => openPicker('pickup')}
+        >
+          <View style={styles.pickupPillDot} />
+          <Text style={styles.pickupPillText} numberOfLines={1}>
+            {pickupLoading
+              ? 'Location dhoondh rahe hain...'
+              : pickup?.address ?? FALLBACK_PICKUP.address}
+          </Text>
+          {locLoading ? (
+            <ActivityIndicator size="small" color={BLUE} />
+          ) : locDenied ? (
+            <Text style={styles.locOffText}>Location off</Text>
+          ) : null}
+        </TouchableOpacity>
 
         {/* Recenter button (sheet ke saath upar-neeche hota hai) */}
         <Animated.View style={[styles.recenter, { top: recenterTop }]}>
@@ -616,80 +646,68 @@ export default function HomeScreen() {
               hideTabBar(e);
             }}
           >
-            {/* Greeting */}
-            <Text style={styles.greet}>{greeting()} 👋</Text>
-            <Text style={styles.greetSub}>Your next ride is just a tap away</Text>
-
-            {/* Pickup + Drop card */}
-            <View style={styles.tripCard}>
-              {/* Pickup */}
-              <TouchableOpacity
-                style={styles.tripRow}
-                activeOpacity={0.7}
-                onPress={() => openPicker('pickup')}
+            {/* Search bar */}
+            <TouchableOpacity
+              style={styles.searchBar}
+              activeOpacity={0.8}
+              onPress={() => openPicker('drop')}
+            >
+              <Ionicons name="search" size={22} color={BLACK} />
+              <Text
+                style={[styles.searchText, !!drop && styles.searchTextFilled]}
+                numberOfLines={1}
               >
-                <View style={styles.pickupDot} />
-                <View style={styles.flex}>
-                  <Text style={styles.fieldLabel}>
-                    {locDenied ? 'PICKUP • LOCATION OFF' : 'PICKUP'}
-                  </Text>
-                  {(locLoading && !pickup) || addrLoading ? (
-                    <Text style={styles.fieldPlaceholder}>Location dhoondh rahe hain...</Text>
-                  ) : (
-                    <Text style={styles.fieldValue} numberOfLines={1}>
-                      {pickup?.address ?? FALLBACK_PICKUP.address}
+                {drop ? drop.address : 'Where do you want to go?'}
+              </Text>
+              {drop && (
+                <TouchableOpacity
+                  onPress={() => setDrop(null)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="close-circle" size={20} color={GREY} />
+                </TouchableOpacity>
+              )}
+            </TouchableOpacity>
+
+            {/* Recent searched locations */}
+            {recentPlaces.map((p) => {
+              const { name, sub } = splitAddress(p.address);
+              const fav = favs.includes(p.address);
+              return (
+                <TouchableOpacity
+                  key={p.address}
+                  style={styles.histRow}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    if (blockedByActiveRide()) return;
+                    setDrop(p);
+                    addRecentPlace(p);
+                  }}
+                >
+                  <Ionicons name="time-outline" size={20} color={GREY} />
+                  <View style={[styles.flex, styles.histText]}>
+                    <Text style={styles.histName} numberOfLines={1}>
+                      {name}
                     </Text>
-                  )}
-                </View>
-
-                {locLoading ? (
-                  <ActivityIndicator color={BLUE} />
-                ) : (
-                  <TouchableOpacity
-                    style={styles.livePill}
-                    activeOpacity={0.8}
-                    onPress={() => fetchCurrentLocation(true)}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  >
-                    <Ionicons name="locate" size={14} color={BLUE} />
-                    <Text style={styles.livePillText}>Live</Text>
-                  </TouchableOpacity>
-                )}
-              </TouchableOpacity>
-
-              {/* Drop (big search bar) */}
-              <TouchableOpacity
-                style={styles.dropBar}
-                activeOpacity={0.8}
-                onPress={() => openPicker('drop')}
-              >
-                <View style={styles.dropSquare} />
-                <View style={styles.flex}>
-                  {drop ? (
-                    <>
-                      <Text style={styles.fieldLabel}>DROP</Text>
-                      <Text style={styles.fieldValue} numberOfLines={1}>
-                        {drop.address}
+                    {!!sub && (
+                      <Text style={styles.histSub} numberOfLines={1}>
+                        {sub}
                       </Text>
-                    </>
-                  ) : (
-                    <Text style={styles.dropPlaceholder}>Where to?</Text>
-                  )}
-                </View>
-
-                {drop ? (
+                    )}
+                  </View>
                   <TouchableOpacity
-                    style={styles.clearBtn}
-                    onPress={() => setDrop(null)}
+                    onPress={() => toggleFav(p.address)}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   >
-                    <Ionicons name="close" size={16} color={GREY} />
+                    <Ionicons
+                      name={fav ? 'heart' : 'heart-outline'}
+                      size={22}
+                      color={fav ? RED : GREY}
+                    />
                   </TouchableOpacity>
-                ) : (
-                  <Ionicons name="search" size={20} color={GREY} />
-                )}
-              </TouchableOpacity>
-            </View>
+                </TouchableOpacity>
+              );
+            })}
 
             {/* Services */}
             <Text style={styles.sectionTitle}>
@@ -834,7 +852,9 @@ export default function HomeScreen() {
                         </View>
                         <View style={styles.flex}>
                           <Text style={styles.recentTitle}>{look.title}</Text>
-                          <Text style={styles.recentSub}>{active ? 'Tap to track' : completed ? `${when} • View bill` : when}</Text>
+                          <Text style={styles.recentSub}>
+                            {active ? 'Tap to track' : completed ? `${when} • View bill` : when}
+                          </Text>
                         </View>
                         <View style={styles.recentRight}>
                           {r.fare != null && (
@@ -885,13 +905,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   centerPinLifted: { transform: [{ translateY: -10 }] },
-  mapPinLabel: {
-    backgroundColor: GREEN_DARK,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-  },
-  mapPinLabelText: { color: '#fff', fontSize: 13, fontWeight: '800' },
   mapPinStem: { width: 2, height: 10, backgroundColor: GREEN_DARK },
   mapPinDotOuter: {
     width: 22,
@@ -951,23 +964,15 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
-  // top bar (map ke upar)
-  topBar: {
+  // bell (map ke upar)
+  bell: {
     position: 'absolute',
-    top: 0,
-    left: 16,
+    top: 10,
     right: 16,
     zIndex: 5,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingTop: 10,
-  },
-  logo: { width: 150, height: 54, marginLeft: -34 },
-  bell: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
@@ -979,8 +984,8 @@ const styles = StyleSheet.create({
   },
   bellDot: {
     position: 'absolute',
-    top: 10,
-    right: 11,
+    top: 9,
+    right: 10,
     width: 9,
     height: 9,
     borderRadius: 5,
@@ -989,79 +994,79 @@ const styles = StyleSheet.create({
     borderColor: '#fff',
   },
 
-  // greeting
-  greet: { fontSize: 24, fontWeight: '800', color: BLACK },
-  greetSub: { fontSize: 14, color: GREY, marginTop: 2, marginBottom: 16 },
-
-  // pickup + drop card
-  tripCard: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 12,
-    marginBottom: 22,
-    elevation: 4,
-    shadowColor: BLACK,
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-  },
-  tripRow: {
+  // pickup pill (map ke upar)
+  pickupPill: {
+    position: 'absolute',
+    top: 10,
+    left: 16,
+    right: 64,
+    zIndex: 5,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 6,
-    paddingBottom: 12,
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    height: 40,
+    elevation: 4,
+    shadowColor: BLACK,
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
   },
-  pickupDot: {
+  pickupPillDot: {
     width: 12,
     height: 12,
     borderRadius: 6,
     backgroundColor: GREEN,
     borderWidth: 3,
     borderColor: '#BBF7D0',
-    marginRight: 12,
+    marginRight: 10,
   },
-  dropBar: {
+  pickupPillText: { flex: 1, fontSize: 13, fontWeight: '600', color: BLACK },
+  locOffText: { fontSize: 11, fontWeight: '700', color: RED, marginLeft: 8 },
+
+  // search bar
+  searchBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: BG,
-    borderRadius: 14,
-    minHeight: 54,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  dropSquare: {
-    width: 12,
-    height: 12,
-    borderRadius: 3,
-    backgroundColor: RED,
-    marginRight: 12,
-  },
-  fieldLabel: { fontSize: 10, fontWeight: '700', color: GREY, letterSpacing: 0.8 },
-  fieldValue: { fontSize: 15, fontWeight: '600', color: BLACK, marginTop: 2 },
-  fieldPlaceholder: { fontSize: 14, color: '#94A3B8', marginTop: 2 },
-  dropPlaceholder: { fontSize: 17, fontWeight: '700', color: BLACK },
-  livePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: BLUE_LIGHT,
-    borderRadius: 14,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    marginLeft: 8,
-  },
-  livePillText: { fontSize: 12, fontWeight: '700', color: BLUE, marginLeft: 4 },
-  clearBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
     backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 8,
+    borderRadius: 24,
+    borderWidth: 1.5,
+    borderColor: '#DBEAFE',
+    paddingHorizontal: 14,
+    height: 44,
+    marginTop: 0,
+    marginBottom: 2,
+    elevation: 3,
+    shadowColor: BLACK,
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
   },
+  searchText: { flex: 1, fontSize: 15, fontWeight: '700', color: BLACK, marginLeft: 10 },
+  searchTextFilled: { fontSize: 14, fontWeight: '600' },
+
+  // recent searched locations
+  histRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 9,
+    borderBottomWidth: 1,
+    borderBottomColor: BORDER,
+    borderStyle: 'dashed',
+  },
+  histText: { marginLeft: 12, marginRight: 8 },
+  histName: { fontSize: 15, fontWeight: '700', color: BLACK },
+  histSub: { fontSize: 12, color: GREY, marginTop: 1 },
 
   // section titles
-  sectionTitle: { fontSize: 17, fontWeight: '800', color: BLACK, marginBottom: 12 },
+  sectionTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: BLACK,
+    marginTop: 12,
+    marginBottom: 10,
+  },
   sectionTitleInline: { fontSize: 17, fontWeight: '800', color: BLACK },
 
   // services (4 across)

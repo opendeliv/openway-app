@@ -98,6 +98,7 @@ type CaptainVehicleInfo = {
   vehicleColor?: string | null;
   isOnline?: boolean;
   pickupRangeKm?: number | string | null;
+  profilePhoto?: string | null;
 };
 
 // Only the pickup range limits are needed from this response
@@ -159,36 +160,6 @@ const ORDER_OPTIONS: OrderOption[] = [
   WORK_OPTIONS.GOODS,
   ALL_OPTION,
 ];
-
-// Work each vehicle can do (keep in sync with VEHICLE_ALLOWED in the backend)
-const VEHICLE_WORKS: Record<string, ('RIDE' | 'PARCEL' | 'GOODS')[]> = {
-  WALK: ['PARCEL'],
-  CYCLE: ['PARCEL'],
-  BIKE: ['RIDE', 'PARCEL'],
-  AUTO: ['RIDE', 'PARCEL', 'GOODS'],
-  CAB: ['RIDE', 'PARCEL'],
-  GOODS_VEHICLE: ['GOODS'],
-};
-
-// Order types this vehicle can choose from ("All" only if it can do 2+ works)
-const orderOptionsFor = (vehicleKey: string | undefined): OrderOption[] => {
-  const works = (vehicleKey && VEHICLE_WORKS[vehicleKey]) || [];
-  const list = works.map((w) => WORK_OPTIONS[w]);
-  return works.length > 1 ? [...list, ALL_OPTION] : list;
-};
-
-// If the saved value is not offered for this vehicle, pick the one that fits
-const normalizeService = (
-  vehicleKey: string | undefined,
-  serviceType: string,
-): string => {
-  const options = orderOptionsFor(vehicleKey);
-  if (options.some((o) => o.id === serviceType)) return serviceType;
-  return options[0]?.id ?? serviceType;
-};
-
-// Only these 2 documents are shown
-const SHOWN_DOCS = ['AADHAAR', 'DRIVING_LICENSE'];
 
 const docLabel = (type: string) =>
   DOC_LABELS[type] ?? { label: type, emoji: '📄' };
@@ -303,13 +274,15 @@ export default function BecomeCaptainScreen() {
   const [docsInfo, setDocsInfo] = useState<MyDocumentsResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Photo load fail ho jaye to initials dikhane ke liye
+  const [photoFailed, setPhotoFailed] = useState(false);
+
   // Ride preferences: pickup range + order type
   const [rangeLimits, setRangeLimits] = useState({
     min: DEFAULT_MIN_RANGE,
     max: DEFAULT_MAX_RANGE,
   });
   const [prefRange, setPrefRange] = useState<number>(DEFAULT_MAX_RANGE);
-  const [prefService, setPrefService] = useState<string>('ALL');
   const [savingPrefs, setSavingPrefs] = useState(false);
 
   // Personal details show only when "Personal Information" is tapped
@@ -341,6 +314,7 @@ export default function BecomeCaptainScreen() {
 
       setCaptain(data);
       setDocsInfo(docs);
+      setPhotoFailed(false); // naya data aaya, photo dobara try karo
 
       const min = options ? Number(options.minRangeKm) : DEFAULT_MIN_RANGE;
       const max = options ? Number(options.maxRangeKm) : DEFAULT_MAX_RANGE;
@@ -355,12 +329,6 @@ export default function BecomeCaptainScreen() {
             : max;
 
       setPrefRange(savedRange);
-      setPrefService(
-        normalizeService(
-          saved.vehicleType ?? docs?.vehicleType,
-          saved.serviceType ?? 'ALL',
-        ),
-      );
 
       hasLoadedOnce.current = true;
     } catch (error: any) {
@@ -415,7 +383,6 @@ export default function BecomeCaptainScreen() {
 
       await api.patch('/captains/me/preferences', {
         pickupRangeKm: prefRange,
-        serviceType: prefService,
       });
       await loadCaptain();
 
@@ -449,14 +416,18 @@ export default function BecomeCaptainScreen() {
   const vehicle = vehicleKey ? VEHICLE_LABELS[vehicleKey] : undefined;
   const onFoot = vehicleKey === 'WALK' || vehicleKey === 'CYCLE';
 
+  // Live photo = SELFIE document, nahi mila to profilePhoto
+  const selfieDoc = (docsInfo?.documents ?? []).find((d) => d.type === 'SELFIE');
+  const photoUrl: string | null =
+    selfieDoc?.fileUrl || info.profilePhoto || null;
+
   const savedRange =
     info.pickupRangeKm != null ? Number(info.pickupRangeKm) : null;
 
-  // Only Aadhaar and Driving License are shown
-  const onlyShown = (type: string) => SHOWN_DOCS.includes(type);
-  const documents = (docsInfo?.documents ?? []).filter((d) => onlyShown(d.type));
-  const missing = (docsInfo?.missing ?? []).filter(onlyShown);
-  const requiredCount = (docsInfo?.required ?? []).filter(onlyShown).length;
+  // Saare uploaded documents dikhao
+  const documents = docsInfo?.documents ?? [];
+  const missing = docsInfo?.missing ?? [];
+  const requiredCount = (docsInfo?.required ?? []).length;
   const requiredUploaded = requiredCount - missing.length;
   const hasPending = documents.some((d) => d.status === 'PENDING');
   const hasRejected = documents.some((d) => d.status === 'REJECTED');
@@ -518,11 +489,10 @@ export default function BecomeCaptainScreen() {
     </View>
   );
 
-  // Ride Preferences: only pickup range and order type can be edited
+  // Ride Preferences: only pickup range can be edited
   const renderPreferencesContent = () => {
     const atMin = prefRange <= rangeLimits.min;
     const atMax = prefRange >= rangeLimits.max;
-    const orderOptions = orderOptionsFor(vehicleKey);
 
     return (
       <View style={styles.expandBox}>
@@ -554,36 +524,6 @@ export default function BecomeCaptainScreen() {
           >
             <Ionicons name="add" size={22} color="#fff" />
           </TouchableOpacity>
-        </View>
-
-        <View style={styles.prefDivider} />
-
-        <Text style={styles.subTitle}>Order type</Text>
-        <Text style={styles.prefHint}>Choose the orders you want to get</Text>
-
-        <View style={styles.orderGrid}>
-          {orderOptions.map((o) => {
-            const selected = prefService === o.id;
-
-            return (
-              <TouchableOpacity
-                key={o.id}
-                style={[styles.orderBtn, selected && styles.orderBtnOn]}
-                activeOpacity={0.85}
-                onPress={() => setPrefService(o.id)}
-              >
-                {selected && (
-                  <View style={styles.orderCheck}>
-                    <Ionicons name="checkmark-circle" size={16} color={BLUE} />
-                  </View>
-                )}
-                <Text style={styles.orderEmoji}>{o.emoji}</Text>
-                <Text style={[styles.orderText, selected && styles.orderTextOn]}>
-                  {o.title}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
         </View>
 
         <TouchableOpacity
@@ -791,7 +731,16 @@ export default function BecomeCaptainScreen() {
 
           <View style={styles.userRow}>
             <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{initials}</Text>
+              {photoUrl && !photoFailed ? (
+                <Image
+                  source={{ uri: photoUrl }}
+                  style={styles.avatarImage}
+                  resizeMode="cover"
+                  onError={() => setPhotoFailed(true)}
+                />
+              ) : (
+                <Text style={styles.avatarText}>{initials}</Text>
+              )}
             </View>
 
             <View style={styles.flex}>
@@ -1024,7 +973,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 14,
+    overflow: 'hidden', // image gol crop ho
   },
+  avatarImage: { width: '100%', height: '100%' },
   avatarText: { fontSize: 24, fontWeight: '800', color: BLUE },
   name: { fontSize: 19, fontWeight: '800', color: '#fff' },
   phoneRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
@@ -1226,30 +1177,6 @@ const styles = StyleSheet.create({
   stepCenter: { flexDirection: 'row', alignItems: 'flex-end' },
   stepValue: { fontSize: 30, fontWeight: '800', color: BLACK },
   stepUnit: { fontSize: 14, fontWeight: '700', color: GREY, marginLeft: 4, marginBottom: 5 },
-
-  prefDivider: { height: 1, backgroundColor: BORDER, marginVertical: 12 },
-  orderGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-  },
-  orderBtn: {
-    width: '48%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 13,
-    marginTop: 8,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: BORDER,
-    backgroundColor: BG,
-  },
-  orderBtnOn: { borderColor: BLUE, backgroundColor: BLUE_LIGHT },
-  orderCheck: { position: 'absolute', top: 5, right: 6 },
-  orderEmoji: { fontSize: 18, marginRight: 6 },
-  orderText: { fontSize: 14, fontWeight: '700', color: GREY },
-  orderTextOn: { color: BLUE, fontWeight: '800' },
 
   saveBtn: {
     flexDirection: 'row',

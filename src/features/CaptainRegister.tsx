@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -12,10 +12,11 @@ import {
   ScrollView,
   KeyboardAvoidingView,
   Platform,
+  PermissionsAndroid,
   StatusBar,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import {
   launchCamera,
@@ -31,9 +32,10 @@ import {
   VehicleType,
 } from '../services/captainsApi';
 import { captainDocumentsApi } from '../services/Captaindocumentsapi';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// Only 2 documents: Aadhaar (everyone) and Driving License (motor vehicles)
-type CaptainDocType = 'AADHAAR' | 'DRIVING_LICENSE';
+// Live photo is taken in step 1. Step 3 documents: Aadhaar, PAN, Driving License, Vehicle RC
+type CaptainDocType = 'LIVE_PHOTO' | 'AADHAAR' | 'PAN' | 'DRIVING_LICENSE' | 'VEHICLE_RC';
 
 const BLUE = '#1F6FE5';
 const BLUE_LIGHT = '#EAF2FF';
@@ -47,6 +49,9 @@ const DISABLED = '#A9C4F2';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Draft is saved per phone number so filled details survive an app close
+const DRAFT_KEY = 'captain_register_draft_v1';
+
 /* =========================================================
    OPTIONS
    ========================================================= */
@@ -54,27 +59,7 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const STEPS = [
   { n: 1, label: 'Personal details' },
   { n: 2, label: 'Vehicle' },
-  { n: 3, label: 'Work & documents' },
-];
-
-const SERVICE_OPTIONS: {
-  id: ServiceType;
-  title: string;
-  sub: string;
-  emoji: string;
-}[] = [
-  {
-    id: 'ALL',
-    title: 'All work',
-    sub: 'Rides, parcels and goods (based on your vehicle)',
-    emoji: '🚀',
-  },
-  {
-    id: 'PARCEL_ONLY',
-    title: 'Parcel only',
-    sub: 'I will only deliver parcels',
-    emoji: '📦',
-  },
+  { n: 3, label: 'Documents' },
 ];
 
 const VEHICLE_OPTIONS: {
@@ -98,18 +83,19 @@ const SUB_TYPES: Partial<Record<VehicleType, { id: string; label: string }[]>> =
     { id: 'scooty', label: 'Scooty' },
   ],
   CAB: [
-    { id: 'mini', label: 'Mini' },
-    { id: 'sedan', label: 'Sedan' },
+    { id: 'mini_van', label: 'Mini Van' },
     { id: 'suv', label: 'SUV' },
+    { id: 'utility_van', label: 'Utility Van' },
   ],
   AUTO: [
     { id: 'auto', label: 'Auto' },
     { id: 'e_rickshaw', label: 'E-Auto' },
-    { id: 'shared_auto', label: 'Shared Auto' },
   ],
   GOODS_VEHICLE: [
     { id: 'tata_ace', label: 'Tata Ace' },
+    { id: 'eicher', label: 'Eicher' },
     { id: 'pickup', label: 'Pickup' },
+    { id: 'mahindra_furio', label: 'Mahindra Furio' },
   ],
 };
 
@@ -121,15 +107,23 @@ const SUB_TYPES: Partial<Record<VehicleType, { id: string; label: string }[]>> =
 type DocMeta = {
   label: string;
   emoji: string;
-  numberLabel: string;
-  numberPlaceholder: string;
-  numberError: string;
-  numberMaxLength: number;
+  hint?: string;
+  cameraOnly?: boolean; // gallery not allowed, only live photo
+  numberLabel?: string;
+  numberPlaceholder?: string;
+  numberError?: string;
+  numberMaxLength?: number;
   numericOnly?: boolean;
-  validate: (value: string) => boolean;
+  validate?: (value: string) => boolean;
 };
 
 const DOC_META: Record<CaptainDocType, DocMeta> = {
+  LIVE_PHOTO: {
+    label: 'Live Photo',
+    emoji: '🤳',
+    hint: 'Take a clear selfie of your face',
+    cameraOnly: true,
+  },
   AADHAAR: {
     label: 'Aadhaar Card',
     emoji: '🪪',
@@ -140,6 +134,15 @@ const DOC_META: Record<CaptainDocType, DocMeta> = {
     numericOnly: true,
     validate: (v) => /^\d{12}$/.test(v),
   },
+  PAN: {
+    label: 'PAN Card',
+    emoji: '💳',
+    numberLabel: 'PAN number',
+    numberPlaceholder: 'e.g. ABCDE1234F',
+    numberError: 'Enter a valid 10 character PAN number',
+    numberMaxLength: 10,
+    validate: (v) => /^[A-Z]{5}[0-9]{4}[A-Z]$/.test(v),
+  },
   DRIVING_LICENSE: {
     label: 'Driving License',
     emoji: '🚘',
@@ -149,18 +152,31 @@ const DOC_META: Record<CaptainDocType, DocMeta> = {
     numberMaxLength: 20,
     validate: (v) => /^[A-Z0-9]{8,20}$/.test(v),
   },
+  VEHICLE_RC: {
+    label: 'Vehicle Document (RC)',
+    emoji: '📄',
+    hint: 'RC photo: vehicle number and owner name should be clear',
+  },
 };
+
+const FOOT_DOCS: CaptainDocType[] = ['AADHAAR', 'PAN'];
+const MOTOR_DOCS: CaptainDocType[] = [
+  'AADHAAR',
+  'PAN',
+  'DRIVING_LICENSE',
+  'VEHICLE_RC',
+];
 
 const DOCUMENTS_BY_VEHICLE: Record<
   VehicleType,
   { required: CaptainDocType[]; optional: CaptainDocType[] }
 > = {
-  WALK: { required: ['AADHAAR'], optional: [] },
-  CYCLE: { required: ['AADHAAR'], optional: [] },
-  BIKE: { required: ['AADHAAR', 'DRIVING_LICENSE'], optional: [] },
-  AUTO: { required: ['AADHAAR', 'DRIVING_LICENSE'], optional: [] },
-  CAB: { required: ['AADHAAR', 'DRIVING_LICENSE'], optional: [] },
-  GOODS_VEHICLE: { required: ['AADHAAR', 'DRIVING_LICENSE'], optional: [] },
+  WALK: { required: FOOT_DOCS, optional: [] },
+  CYCLE: { required: FOOT_DOCS, optional: [] },
+  BIKE: { required: MOTOR_DOCS, optional: [] },
+  AUTO: { required: MOTOR_DOCS, optional: [] },
+  CAB: { required: MOTOR_DOCS, optional: [] },
+  GOODS_VEHICLE: { required: MOTOR_DOCS, optional: [] },
 };
 
 type DocItem = {
@@ -168,17 +184,128 @@ type DocItem = {
   mime?: string;
   name?: string;
   number: string;
-  uploaded?: boolean;
+  uploaded?: boolean; // approved by admin, locked
+  remote?: boolean; // already on the server, no need to upload again
 };
 
 type DocsState = Partial<Record<CaptainDocType, DocItem>>;
 
 const isOnFoot = (v: VehicleType | null) => v === 'WALK' || v === 'CYCLE';
 
+// The whole app is parcel/goods now, so the work type is not asked from the user
+const serviceTypeFor = (v: VehicleType): ServiceType =>
+  isOnFoot(v) ? 'PARCEL_ONLY' : 'ALL';
+
+// Names the backend (DocumentType enum) understands
+const API_DOC_TYPE = {
+  LIVE_PHOTO: 'SELFIE',
+  AADHAAR: 'AADHAAR',
+  PAN: 'PAN',
+  DRIVING_LICENSE: 'DRIVING_LICENSE',
+  VEHICLE_RC: 'RC',
+} as const;
+
+// Backend DocumentType -> app type (used when editing a rejected request)
+const APP_DOC_TYPE: Record<string, CaptainDocType> = {
+  SELFIE: 'LIVE_PHOTO',
+  AADHAAR: 'AADHAAR',
+  PAN: 'PAN',
+  DRIVING_LICENSE: 'DRIVING_LICENSE',
+  RC: 'VEHICLE_RC',
+};
+
 const normalizeNumber = (type: CaptainDocType, value: string) =>
   type === 'AADHAAR'
     ? value.replace(/\D/g, '')
     : value.replace(/\s/g, '').toUpperCase();
+
+/* =========================================================
+   SMALL ICONS (plain Views, no icon library needed)
+   ========================================================= */
+
+const CameraIcon = ({
+  color,
+  bg,
+  size = 16,
+}: {
+  color: string;
+  bg: string;
+  size?: number;
+}) => (
+  <View style={{ width: size, height: size, justifyContent: 'flex-end' }}>
+    <View
+      style={{
+        position: 'absolute',
+        top: size * 0.08,
+        left: size * 0.3,
+        width: size * 0.4,
+        height: size * 0.22,
+        backgroundColor: color,
+        borderTopLeftRadius: 2,
+        borderTopRightRadius: 2,
+      }}
+    />
+    <View
+      style={{
+        height: size * 0.72,
+        borderRadius: size * 0.18,
+        backgroundColor: color,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <View
+        style={{
+          width: size * 0.4,
+          height: size * 0.4,
+          borderRadius: size * 0.2,
+          borderWidth: 1.5,
+          borderColor: bg,
+        }}
+      />
+    </View>
+  </View>
+);
+
+const GalleryIcon = ({ color, size = 16 }: { color: string; size?: number }) => (
+  <View
+    style={{
+      width: size,
+      height: size,
+      borderWidth: 1.5,
+      borderColor: color,
+      borderRadius: 4,
+      overflow: 'hidden',
+    }}
+  >
+    <View
+      style={{
+        position: 'absolute',
+        top: 2,
+        right: 2,
+        width: size * 0.24,
+        height: size * 0.24,
+        borderRadius: size * 0.12,
+        backgroundColor: color,
+      }}
+    />
+    <View
+      style={{
+        position: 'absolute',
+        bottom: 0,
+        left: 1,
+        width: 0,
+        height: 0,
+        borderLeftWidth: size * 0.3,
+        borderRightWidth: size * 0.3,
+        borderBottomWidth: size * 0.42,
+        borderLeftColor: 'transparent',
+        borderRightColor: 'transparent',
+        borderBottomColor: color,
+      }}
+    />
+  </View>
+);
 
 /* =========================================================
    SCREEN
@@ -187,6 +314,10 @@ const normalizeNumber = (type: CaptainDocType, value: string) =>
 export default function CaptainRegisterScreen() {
   const navigation =
     useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+
+  // resubmit = captain request was rejected, user edits and sends it again
+  const route = useRoute<RouteProp<RootStackParamList, 'CaptainRegister'>>();
+  const resubmit = !!route.params?.resubmit;
 
   const [step, setStep] = useState<1 | 2 | 3>(1);
 
@@ -206,7 +337,6 @@ export default function CaptainRegisterScreen() {
   const [submitted2, setSubmitted2] = useState(false);
 
   // Step 3
-  const [serviceType, setServiceType] = useState<ServiceType | null>(null);
   const [docs, setDocs] = useState<DocsState>({});
   const [submitted3, setSubmitted3] = useState(false);
 
@@ -216,6 +346,16 @@ export default function CaptainRegisterScreen() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [progress, setProgress] = useState('');
+
+  // Rejected request: reason from admin
+  const [rejectReason, setRejectReason] = useState('');
+  const [rejectedDocs, setRejectedDocs] = useState<
+    Partial<Record<CaptainDocType, string>>
+  >({});
+
+  // Draft saving
+  const [draftKey, setDraftKey] = useState<string | null>(null);
+  const finished = useRef(false);
 
   const onFoot = isOnFoot(vehicleType);
   const subTypes = vehicleType ? SUB_TYPES[vehicleType] ?? [] : [];
@@ -233,17 +373,97 @@ export default function CaptainRegisterScreen() {
       ]
     : [];
 
-  // Prefill name, phone and email from the user profile
+  // Rejected request: fill the form with what the captain sent earlier
+  const loadExisting = async () => {
+    try {
+      const c: any = await captainsApi.getMyCaptain();
+      if (c) {
+        if (c.name) setName(c.name);
+        if (c.email) setEmail(c.email);
+        if (c.vehicleType && DOCUMENTS_BY_VEHICLE[c.vehicleType as VehicleType]) {
+          setVehicleType(c.vehicleType);
+          setVehicleSubType(c.vehicleSubType ?? null);
+          setVehicleNumber(c.vehicleNumber ?? '');
+          setVehicleModel(c.vehicleModel ?? '');
+          setVehicleColor(c.vehicleColor ?? '');
+        }
+        setRejectReason(c.rejectionReason ?? c.rejectedReason ?? '');
+      }
+
+      const res: any = await captainDocumentsApi.getMyDocuments();
+      const next: DocsState = {};
+      const rejected: Partial<Record<CaptainDocType, string>> = {};
+
+      (res?.documents ?? []).forEach((d: any) => {
+        const type = APP_DOC_TYPE[d.type];
+        if (!type) return;
+
+        if (d.status === 'REJECTED') {
+          // rejected document has to be uploaded again
+          rejected[type] = d.rejectionReason ?? '';
+          return;
+        }
+
+        next[type] = {
+          uri: d.fileUrl,
+          number: d.documentNumber ?? '',
+          uploaded: d.status === 'APPROVED',
+          remote: true,
+        };
+      });
+
+      setDocs(next);
+      setRejectedDocs(rejected);
+      setAgreed(true);
+    } catch {
+      // form stays empty, user can fill it again
+    }
+  };
+
+  // Prefill from profile, then restore the saved draft (if the app was closed midway)
   useEffect(() => {
     const loadProfile = async () => {
       try {
         const profile = await profileApi.getProfile();
+        const digits = (profile.phone ?? '').replace(/\D/g, '').slice(-10);
+        const key = `${DRAFT_KEY}_${digits}`;
 
         setName(profile.name ?? '');
         setEmail(profile.email ?? '');
+        setPhone(digits);
 
-        const digits = (profile.phone ?? '').replace(/\D/g, '');
-        setPhone(digits.slice(-10));
+        if (resubmit) {
+          await loadExisting();
+          return; // no draft for a resubmit
+        }
+
+        try {
+          const raw = await AsyncStorage.getItem(key);
+          if (raw) {
+            const d = JSON.parse(raw);
+            if (d.name) setName(d.name);
+            if (d.email) setEmail(d.email);
+            if (d.agreed) setAgreed(true);
+            setDocs(d.docs ?? {});
+
+            const hasVehicle =
+              !!d.vehicleType && !!DOCUMENTS_BY_VEHICLE[d.vehicleType as VehicleType];
+
+            if (hasVehicle) {
+              setVehicleType(d.vehicleType);
+              setVehicleSubType(d.vehicleSubType ?? null);
+              setVehicleNumber(d.vehicleNumber ?? '');
+              setVehicleModel(d.vehicleModel ?? '');
+              setVehicleColor(d.vehicleColor ?? '');
+              setCaptainCreated(!!d.captainCreated);
+            }
+            setStep(d.step === 3 && hasVehicle ? 3 : d.step >= 2 ? 2 : 1);
+          }
+        } catch {
+          // a broken draft is ignored
+        }
+
+        setDraftKey(key);
       } catch (error: any) {
         Alert.alert('Error', error?.message || 'Could not load your profile');
         navigation.goBack();
@@ -253,7 +473,41 @@ export default function CaptainRegisterScreen() {
     };
 
     loadProfile();
-  }, [navigation]);
+  }, [navigation, resubmit]);
+
+  // Save the draft on every change
+  useEffect(() => {
+    if (!draftKey || finished.current) return;
+    AsyncStorage.setItem(
+      draftKey,
+      JSON.stringify({
+        step,
+        name,
+        email,
+        agreed,
+        vehicleType,
+        vehicleSubType,
+        vehicleNumber,
+        vehicleModel,
+        vehicleColor,
+        docs,
+        captainCreated,
+      }),
+    ).catch(() => {});
+  }, [
+    draftKey,
+    step,
+    name,
+    email,
+    agreed,
+    vehicleType,
+    vehicleSubType,
+    vehicleNumber,
+    vehicleModel,
+    vehicleColor,
+    docs,
+    captainCreated,
+  ]);
 
   /* ---------- Back handling ---------- */
 
@@ -286,11 +540,14 @@ export default function CaptainRegisterScreen() {
   const errors1 = {
     name: name.trim().length < 3 ? 'Enter your full name (at least 3 letters)' : '',
     email: !EMAIL_REGEX.test(email.trim()) ? 'Enter a valid email' : '',
+    // TODO: live photo is optional for testing. For production use:
+    // photo: !docs.LIVE_PHOTO?.uri ? 'Take your live photo to continue' : '',
+    photo: '',
   };
   const isValid1 = Object.values(errors1).every((e) => !e);
 
   const onPrivacyPress = () => {
-    // TODO: open Privacy Policy page / link
+    navigation.navigate('PrivacyPolicy');
   };
 
   const onNext1 = () => {
@@ -309,17 +566,14 @@ export default function CaptainRegisterScreen() {
     setVehicleSubType(null);
 
     if (isOnFoot(id)) {
-      setServiceType('PARCEL_ONLY');
       setVehicleNumber('');
       setVehicleModel('');
       setVehicleColor('');
-    } else if (serviceType === 'PARCEL_ONLY' && isOnFoot(vehicleType)) {
-      // Switching from walk/cycle to a motor vehicle: let the user choose again
-      setServiceType(null);
     }
 
     // Remove documents that the new vehicle does not need
-    const allowed = [
+    const allowed: CaptainDocType[] = [
+      'LIVE_PHOTO',
       ...DOCUMENTS_BY_VEHICLE[id].required,
       ...DOCUMENTS_BY_VEHICLE[id].optional,
     ];
@@ -356,13 +610,7 @@ export default function CaptainRegisterScreen() {
     setStep(3);
   };
 
-  /* ---------- Step 3: work type + documents ---------- */
-
-  const onSelectService = (id: ServiceType) => {
-    if (captainCreated) return;
-    if (onFoot && id === 'ALL') return;
-    setServiceType(id);
-  };
+  /* ---------- Step 3: documents ---------- */
 
   const pickImage = async (
     type: CaptainDocType,
@@ -377,11 +625,31 @@ export default function CaptainRegisterScreen() {
     };
 
     try {
+      // Ask the camera permission at runtime (manifest alone is not enough on Android 6+)
+      if (source === 'camera' && Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.CAMERA,
+          {
+            title: 'Camera permission',
+            message: 'Camera is needed to take photos for your registration',
+            buttonPositive: 'Allow',
+            buttonNegative: 'Cancel',
+          },
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          Alert.alert(
+            'Camera permission needed',
+            'Open phone Settings > Apps > this app > Permissions and allow Camera.',
+          );
+          return;
+        }
+      }
+
       const res: ImagePickerResponse =
         source === 'camera'
           ? await launchCamera({
               ...base,
-              cameraType: 'back',
+              cameraType: type === 'LIVE_PHOTO' ? 'front' : 'back',
               saveToPhotos: false,
             })
           : await launchImageLibrary(base);
@@ -438,6 +706,8 @@ export default function CaptainRegisterScreen() {
   };
 
   const numberFor = (type: CaptainDocType): string | undefined => {
+    // RC is sent with the vehicle number entered in step 2
+    if (type === 'VEHICLE_RC') return vehicleNumber.trim().toUpperCase();
     if (!DOC_META[type].numberLabel) return undefined;
     return normalizeNumber(type, docs[type]?.number ?? '');
   };
@@ -455,11 +725,8 @@ export default function CaptainRegisterScreen() {
     return '';
   };
 
-  const errors3 = {
-    serviceType: !serviceType ? 'Select the type of work' : '',
-  };
   const docsValid = docList.every((d) => !docError(d.type, d.required));
-  const isValid3 = Object.values(errors3).every((e) => !e) && docsValid;
+  const isValid3 = docsValid;
 
   /* ---------- Submit ---------- */
 
@@ -467,7 +734,9 @@ export default function CaptainRegisterScreen() {
     if (saving) return;
 
     setSubmitted3(true);
-    if (!isValid3 || !serviceType || !vehicleType) return;
+    if (!isValid3 || !vehicleType) return;
+
+    const serviceType = serviceTypeFor(vehicleType);
 
     let created = captainCreated;
 
@@ -495,14 +764,18 @@ export default function CaptainRegisterScreen() {
               }),
         };
 
-        await captainsApi.createCaptain(payload);
+        if (resubmit) {
+          await captainsApi.resubmitCaptain(payload);
+        } else {
+          await captainsApi.createCaptain(payload);
+        }
         created = true;
         setCaptainCreated(true);
       }
 
       // Upload only the documents that are not uploaded yet
-      const pending = docList.filter(
-        (d) => docs[d.type]?.uri && !docs[d.type]?.uploaded,
+      const pending = [{ type: 'LIVE_PHOTO' as CaptainDocType }, ...docList].filter(
+        (d) => docs[d.type]?.uri && !docs[d.type]?.uploaded && !docs[d.type]?.remote,
       );
 
       let done = 0;
@@ -520,7 +793,7 @@ export default function CaptainRegisterScreen() {
         });
 
         await captainDocumentsApi.upload({
-          type,
+          type: API_DOC_TYPE[type],
           fileUrl,
           documentNumber: numberFor(type),
         });
@@ -532,9 +805,16 @@ export default function CaptainRegisterScreen() {
         done += 1;
       }
 
+      finished.current = true;
+      if (draftKey) {
+        AsyncStorage.removeItem(draftKey).catch(() => {});
+      }
+
       Alert.alert(
         'Request Submitted',
-        'Your captain request and documents have been sent. You can take rides after verification.',
+        resubmit
+          ? 'Your updated details have been sent again for verification.'
+          : 'Your captain request and documents have been sent. You can start deliveries after verification.',
         [{ text: 'OK', onPress: () => navigation.goBack() }],
       );
     } catch (error: any) {
@@ -555,48 +835,155 @@ export default function CaptainRegisterScreen() {
      RENDER HELPERS
      ========================================================= */
 
+  const renderLivePhoto = () => {
+    const item = docs.LIVE_PHOTO;
+    const has = !!item?.uri;
+    const locked = !!item?.uploaded;
+    const err = submitted1 ? errors1.photo : '';
+
+    return (
+      <View style={styles.liveRow}>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          disabled={saving || locked}
+          onPress={() => pickImage('LIVE_PHOTO', 'camera')}
+          style={[styles.liveAvatar, !!err && styles.liveAvatarError]}
+        >
+          {has ? (
+            <Image
+              source={{ uri: item!.uri }}
+              style={styles.liveImg}
+              onError={() => {
+                if (!locked) removeDoc('LIVE_PHOTO');
+              }}
+            />
+          ) : (
+            <Text style={styles.liveIcon}>🤳</Text>
+          )}
+        </TouchableOpacity>
+
+        <View style={styles.flex}>
+          <Text style={styles.liveTitle}>Live photo (optional)</Text>
+          <Text style={styles.liveSub}>Take a clear selfie, face should be visible</Text>
+          {locked ? (
+            <Text style={[styles.verified, styles.liveGap]}>Uploaded ✓</Text>
+          ) : (
+            <TouchableOpacity
+              style={styles.liveBtn}
+              activeOpacity={0.85}
+              onPress={() => pickImage('LIVE_PHOTO', 'camera')}
+              disabled={saving}
+            >
+              <CameraIcon color={BLUE} bg="#fff" size={14} />
+              <Text style={styles.liveBtnText}>{has ? 'Retake' : 'Take photo'}</Text>
+            </TouchableOpacity>
+          )}
+          {!!err && <Text style={styles.error}>{err}</Text>}
+        </View>
+      </View>
+    );
+  };
+
   const renderDoc = (type: CaptainDocType, required: boolean) => {
     const meta = DOC_META[type];
     const item = docs[type];
     const err = submitted3 ? docError(type, required) : '';
+    const hasPhoto = !!item?.uri;
+    const locked = !!item?.uploaded;
+
+    let badgeText = required ? 'Required' : 'Optional';
+    let badgeStyle = required ? styles.badgeRequired : styles.badgeOptional;
+    let badgeTextStyle = required ? styles.badgeTextRed : styles.badgeTextGrey;
+    if (locked) {
+      badgeText = 'Uploaded ✓';
+      badgeStyle = styles.badgeDone;
+      badgeTextStyle = styles.badgeTextGreen;
+    } else if (hasPhoto) {
+      badgeText = 'Added';
+      badgeStyle = styles.badgeAdded;
+      badgeTextStyle = styles.badgeTextBlue;
+    }
 
     return (
-      <View key={type} style={[styles.docCard, !!err && styles.docCardError]}>
+      <View
+        key={type}
+        style={[
+          styles.docCard,
+          hasPhoto && !err && styles.docCardDone,
+          !!err && styles.docCardError,
+        ]}
+      >
         <View style={styles.docHead}>
-          <Text style={styles.docEmoji}>{meta.emoji}</Text>
+          <View style={[styles.docIconWrap, hasPhoto && styles.docIconWrapDone]}>
+            <Text style={styles.docEmoji}>{meta.emoji}</Text>
+          </View>
           <View style={styles.flex}>
             <Text style={styles.docTitle}>{meta.label}</Text>
-            <Text style={styles.docTag}>{required ? 'Required' : 'Optional'}</Text>
+            {!!meta.hint && <Text style={styles.docTag}>{meta.hint}</Text>}
           </View>
-          {item?.uploaded && <Text style={styles.verified}>Uploaded ✓</Text>}
+          <View style={[styles.badge, badgeStyle]}>
+            <Text style={[styles.badgeText, badgeTextStyle]}>{badgeText}</Text>
+          </View>
         </View>
 
-        {item?.uri ? (
+        {!hasPhoto && rejectedDocs[type] !== undefined && (
+          <Text style={styles.docRejectNote}>
+            Rejected{rejectedDocs[type] ? `: ${rejectedDocs[type]}` : ''}. Please upload again.
+          </Text>
+        )}
+
+        {hasPhoto ? (
           <View style={styles.previewRow}>
-            <Image source={{ uri: item.uri }} style={styles.thumb} />
-            <View style={styles.previewActions}>
-              <TouchableOpacity
-                onPress={() => pickImage(type, 'gallery')}
-                disabled={saving || item.uploaded}
-              >
-                <Text style={styles.linkBtn}>Change</Text>
-              </TouchableOpacity>
-              {!item.uploaded && (
-                <TouchableOpacity onPress={() => removeDoc(type)} disabled={saving}>
-                  <Text style={[styles.linkBtn, styles.linkRed]}>Remove</Text>
+            <Image
+              source={{ uri: item!.uri }}
+              style={styles.thumb}
+              resizeMode="cover"
+              onError={() => {
+                // photo file is gone (cache cleared), user has to add it again
+                if (!locked) removeDoc(type);
+              }}
+            />
+            {!locked && (
+              <View style={styles.actionRow}>
+                <TouchableOpacity
+                  style={styles.actionBtn}
+                  activeOpacity={0.85}
+                  onPress={() => pickImage(type, 'camera')}
+                  disabled={saving}
+                >
+                  <CameraIcon color={BLUE} bg="#fff" size={14} />
+                  <Text style={styles.actionBtnText}>Retake</Text>
                 </TouchableOpacity>
-              )}
-            </View>
+                <TouchableOpacity
+                  style={styles.actionBtn}
+                  activeOpacity={0.85}
+                  onPress={() => pickImage(type, 'gallery')}
+                  disabled={saving}
+                >
+                  <GalleryIcon color={BLUE} size={14} />
+                  <Text style={styles.actionBtnText}>Gallery</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.actionBtn, styles.actionBtnRed]}
+                  activeOpacity={0.85}
+                  onPress={() => removeDoc(type)}
+                  disabled={saving}
+                >
+                  <Text style={[styles.actionBtnText, styles.actionBtnTextRed]}>Remove</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         ) : (
           <View style={styles.uploadRow}>
             <TouchableOpacity
-              style={styles.uploadBtn}
+              style={[styles.uploadBtn, styles.uploadBtnAlt]}
               activeOpacity={0.85}
               onPress={() => pickImage(type, 'gallery')}
               disabled={saving}
             >
-              <Text style={styles.uploadBtnText}>🖼️ Gallery</Text>
+              <GalleryIcon color={BLUE} />
+              <Text style={[styles.uploadBtnText, styles.uploadBtnAltText]}>Gallery</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.uploadBtn}
@@ -604,27 +991,35 @@ export default function CaptainRegisterScreen() {
               onPress={() => pickImage(type, 'camera')}
               disabled={saving}
             >
-              <Text style={styles.uploadBtnText}>📷 Camera</Text>
+              <CameraIcon color="#fff" bg={BLUE} />
+              <Text style={styles.uploadBtnText}>Camera</Text>
             </TouchableOpacity>
           </View>
         )}
 
-        {!!meta.numberLabel && !!item?.uri && (
-          <>
-            <Text style={[styles.label, styles.labelGap]}>{meta.numberLabel}</Text>
+        {!!meta.numberLabel && hasPhoto && (
+          <View style={styles.numberBlock}>
+            <Text style={styles.numberLabel}>{meta.numberLabel}</Text>
             <TextInput
-              style={[styles.input, !!err && styles.inputError]}
+              style={[styles.inputCompact, !!err && styles.inputError]}
               placeholder={meta.numberPlaceholder}
               placeholderTextColor="#94A3B8"
-              value={item.number}
+              value={item!.number}
               onChangeText={(t) => setDocNumber(type, t)}
               maxLength={meta.numberMaxLength}
               keyboardType={meta.numericOnly ? 'number-pad' : 'default'}
               autoCapitalize="characters"
               autoCorrect={false}
-              editable={!item.uploaded && !saving}
+              editable={!locked && !saving}
             />
-          </>
+          </View>
+        )}
+
+        {type === 'VEHICLE_RC' && hasPhoto && (
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>Vehicle number</Text>
+            <Text style={styles.infoValue}>{vehicleNumber.trim().toUpperCase()}</Text>
+          </View>
         )}
 
         {!!err && <Text style={styles.error}>{err}</Text>}
@@ -692,10 +1087,20 @@ export default function CaptainRegisterScreen() {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
+          {resubmit && (
+            <View style={styles.rejectBanner}>
+              <Text style={styles.rejectTitle}>Your request was rejected</Text>
+              <Text style={styles.rejectText}>
+                {rejectReason ? `Reason: ${rejectReason}. ` : ''}
+                Correct your details and submit again.
+              </Text>
+            </View>
+          )}
+
           {step === 1 && (
             <>
               <View style={styles.intro}>
-                <Text style={styles.introEmoji}>🏍️</Text>
+                <Text style={styles.introEmoji}>📦</Text>
                 <Text style={styles.introTitle}>Register to become a captain</Text>
                 <Text style={styles.introSub}>
                   First check your details, then add your vehicle and documents
@@ -704,6 +1109,8 @@ export default function CaptainRegisterScreen() {
 
               <View style={styles.card}>
                 <Text style={styles.sectionTitle}>Personal details</Text>
+
+                {renderLivePhoto()}
 
                 <Text style={styles.label}>Full name</Text>
                 <TextInput
@@ -865,7 +1272,7 @@ export default function CaptainRegisterScreen() {
                     <Text style={[styles.label, styles.labelGap]}>Model (optional)</Text>
                     <TextInput
                       style={styles.input}
-                      placeholder="e.g. Splendor Plus"
+                      placeholder="e.g. Tata Ace Gold"
                       placeholderTextColor="#94A3B8"
                       value={vehicleModel}
                       onChangeText={setVehicleModel}
@@ -875,7 +1282,7 @@ export default function CaptainRegisterScreen() {
                     <Text style={[styles.label, styles.labelGap]}>Color (optional)</Text>
                     <TextInput
                       style={styles.input}
-                      placeholder="e.g. Black"
+                      placeholder="e.g. White"
                       placeholderTextColor="#94A3B8"
                       value={vehicleColor}
                       onChangeText={setVehicleColor}
@@ -889,60 +1296,42 @@ export default function CaptainRegisterScreen() {
 
           {step === 3 && (
             <>
-              {/* Work type */}
-              <View style={styles.card}>
-                <Text style={styles.sectionTitle}>What work will you do?</Text>
-
-                {SERVICE_OPTIONS.map((s) => {
-                  const selected = serviceType === s.id;
-                  const locked = (onFoot && s.id === 'ALL') || (captainCreated && !selected);
-                  return (
-                    <TouchableOpacity
-                      key={s.id}
-                      style={[
-                        styles.optionRow,
-                        selected && styles.optionRowOn,
-                        locked && styles.optionRowLocked,
-                      ]}
-                      activeOpacity={0.85}
-                      disabled={locked}
-                      onPress={() => onSelectService(s.id)}
-                    >
-                      <Text style={styles.optionEmoji}>{s.emoji}</Text>
-                      <View style={styles.flex}>
-                        <Text style={styles.optionTitle}>{s.title}</Text>
-                        <Text style={styles.optionSub}>{s.sub}</Text>
-                      </View>
-                      <View style={[styles.radio, selected && styles.radioOn]}>
-                        {selected && <View style={styles.radioDot} />}
-                      </View>
-                    </TouchableOpacity>
-                  );
-                })}
-
-                {onFoot && (
-                  <Text style={styles.hintText}>
-                    Walk and cycle captains can only deliver parcels over short distances.
-                  </Text>
-                )}
-                {submitted3 && !!errors3.serviceType && (
-                  <Text style={styles.error}>{errors3.serviceType}</Text>
-                )}
-              </View>
-
-              {/* Documents */}
               {!!vehicleType && (
-                <View style={[styles.card, styles.cardGap]}>
-                  <Text style={styles.sectionTitle}>Documents</Text>
-                  <Text style={styles.docIntro}>
-                    You need Aadhaar and, for a motor vehicle, a Driving License. Take a clear photo and enter the number.
-                  </Text>
+                <>
+                  <View style={styles.card}>
+                    <View style={styles.docHeaderRow}>
+                      <Text style={styles.docHeaderTitle}>Upload documents</Text>
+                      <Text style={styles.docProgressText}>
+                        {docList.filter((d) => !!docs[d.type]?.uri).length} / {docList.length}
+                      </Text>
+                    </View>
+                    <View style={styles.docProgressTrack}>
+                      <View
+                        style={[
+                          styles.docProgressFill,
+                          {
+                            width: `${
+                              (docList.filter((d) => !!docs[d.type]?.uri).length /
+                                Math.max(docList.length, 1)) *
+                              100
+                            }%`,
+                          },
+                        ]}
+                      />
+                    </View>
+                    <Text style={styles.docIntro}>
+                      {onFoot
+                        ? 'Add your Aadhaar and PAN card.'
+                        : 'Add Aadhaar, PAN, Driving License and the vehicle document (RC) showing who owns the vehicle.'}
+                    </Text>
+                  </View>
+
                   {docList.map((d) => renderDoc(d.type, d.required))}
-                </View>
+                </>
               )}
 
               <Text style={styles.note}>
-                Note: You can take rides only after your documents are verified.
+                Note: You can start deliveries only after your documents are verified.
               </Text>
             </>
           )}
@@ -966,7 +1355,13 @@ export default function CaptainRegisterScreen() {
             <ActivityIndicator color="#fff" />
           ) : (
             <Text style={styles.btnText}>
-              {step === 3 ? (captainCreated ? 'Retry upload' : 'Submit') : 'Next'}
+              {step === 3
+                ? captainCreated
+                  ? 'Retry upload'
+                  : resubmit
+                    ? 'Submit again'
+                    : 'Submit'
+                : 'Next'}
             </Text>
           )}
         </TouchableOpacity>
@@ -1098,22 +1493,8 @@ const styles = StyleSheet.create({
   subChipText: { fontSize: 13.5, fontWeight: '700', color: GREY, marginLeft: 8 },
   subChipTextOn: { color: BLUE },
 
-  // service options
-  optionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 12,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: BORDER,
-    backgroundColor: BG,
-    marginBottom: 10,
-  },
-  optionRowOn: { borderColor: BLUE, backgroundColor: BLUE_LIGHT },
+  // locked option (after captain is created)
   optionRowLocked: { opacity: 0.4 },
-  optionEmoji: { fontSize: 26, marginRight: 12 },
-  optionTitle: { fontSize: 15, fontWeight: '800', color: BLACK },
-  optionSub: { fontSize: 12, color: GREY, marginTop: 2 },
   radio: {
     width: 22,
     height: 22,
@@ -1125,42 +1506,166 @@ const styles = StyleSheet.create({
   },
   radioOn: { borderColor: BLUE },
   radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: BLUE },
-  hintText: { fontSize: 12, color: GREY, marginTop: 2, lineHeight: 18 },
 
-  // documents
-  docIntro: { fontSize: 12.5, color: GREY, marginTop: -6, marginBottom: 12 },
-  docCard: {
-    borderWidth: 1.5,
-    borderColor: BORDER,
+  // rejected request
+  rejectBanner: {
+    backgroundColor: '#FEF3C7',
     borderRadius: 14,
     padding: 12,
-    marginBottom: 12,
-    backgroundColor: BG,
+    marginBottom: 14,
   },
-  docCardError: { borderColor: RED },
-  docHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
-  docEmoji: { fontSize: 24, marginRight: 10 },
-  docTitle: { fontSize: 14, fontWeight: '800', color: BLACK },
-  docTag: { fontSize: 11.5, color: GREY, marginTop: 1 },
-  uploadRow: { flexDirection: 'row' },
-  uploadBtn: {
-    flex: 1,
-    marginHorizontal: 4,
-    height: 46,
-    borderRadius: 12,
+  rejectTitle: { fontSize: 13.5, fontWeight: '800', color: '#92400E' },
+  rejectText: { fontSize: 12, color: '#92400E', marginTop: 3, lineHeight: 17 },
+  docRejectNote: { fontSize: 11.5, color: RED, marginBottom: 8, lineHeight: 16 },
+
+  // live photo (step 1)
+  liveRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  liveAvatar: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    borderWidth: 2,
+    borderStyle: 'dashed',
+    borderColor: '#9DBFF5',
+    backgroundColor: '#F5F9FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    marginRight: 14,
+  },
+  liveAvatarError: { borderColor: RED },
+  liveImg: { width: '100%', height: '100%' },
+  liveIcon: { fontSize: 30 },
+  liveTitle: { fontSize: 14, fontWeight: '800', color: BLACK },
+  liveSub: { fontSize: 11.5, color: GREY, marginTop: 2, lineHeight: 16 },
+  liveGap: { marginTop: 8 },
+  liveBtn: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    gap: 6,
+    height: 30,
+    paddingHorizontal: 12,
+    borderRadius: 15,
     borderWidth: 1.5,
     borderColor: BLUE,
-    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 8,
+  },
+  liveBtnText: { color: BLUE, fontWeight: '700', fontSize: 12.5 },
+
+  // documents (compact)
+  docHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
+  docHeaderTitle: { fontSize: 15, fontWeight: '800', color: BLACK },
+  docProgressText: { fontSize: 12, fontWeight: '700', color: GREY },
+  docProgressTrack: {
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: BORDER,
+    overflow: 'hidden',
+  },
+  docProgressFill: { height: 5, borderRadius: 3, backgroundColor: GREEN },
+  docIntro: { fontSize: 12, color: GREY, lineHeight: 17, marginTop: 10 },
+
+  docCard: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 10,
+    marginTop: 8,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    elevation: 1,
+    shadowColor: '#0F172A',
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 1 },
+  },
+  docCardDone: { borderColor: '#BBF7D0' },
+  docCardError: { borderColor: RED },
+  docHead: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
+  docIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
     backgroundColor: BLUE_LIGHT,
     alignItems: 'center',
     justifyContent: 'center',
+    marginRight: 10,
   },
-  uploadBtnText: { color: BLUE, fontWeight: '700', fontSize: 13.5 },
+  docIconWrapDone: { backgroundColor: '#DCFCE7' },
+  docEmoji: { fontSize: 18 },
+  docTitle: { fontSize: 13.5, fontWeight: '800', color: BLACK },
+  docTag: { fontSize: 11, color: GREY, marginTop: 1 },
+
+  badge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12, marginLeft: 8 },
+  badgeText: { fontSize: 10.5, fontWeight: '800' },
+  badgeRequired: { backgroundColor: '#FEF3C7' },
+  badgeOptional: { backgroundColor: '#F1F5F9' },
+  badgeAdded: { backgroundColor: BLUE_LIGHT },
+  badgeDone: { backgroundColor: '#DCFCE7' },
+  badgeTextRed: { color: '#B45309' },
+  badgeTextGrey: { color: GREY },
+  badgeTextBlue: { color: BLUE },
+  badgeTextGreen: { color: GREEN },
+
+  uploadRow: { flexDirection: 'row', gap: 8 },
+  uploadBtn: {
+    flexDirection: 'row',
+    gap: 6,
+    height: 30,
+    paddingHorizontal: 12,
+    borderRadius: 15,
+    backgroundColor: BLUE,
+    borderWidth: 1.5,
+    borderColor: BLUE,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  uploadBtnText: { color: '#fff', fontWeight: '700', fontSize: 12 },
+  uploadBtnAlt: { backgroundColor: '#fff' },
+  uploadBtnAltText: { color: BLUE },
+
   previewRow: { flexDirection: 'row', alignItems: 'center' },
-  thumb: { width: 84, height: 60, borderRadius: 10, backgroundColor: BORDER },
-  previewActions: { marginLeft: 14 },
-  linkBtn: { color: BLUE, fontWeight: '700', fontSize: 13.5, paddingVertical: 4 },
-  linkRed: { color: RED },
+  thumb: { width: 72, height: 52, borderRadius: 8, backgroundColor: BORDER },
+  actionRow: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginLeft: 10 },
+  actionBtn: {
+    flexDirection: 'row',
+    gap: 5,
+    height: 28,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: BLUE,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionBtnText: { color: BLUE, fontWeight: '700', fontSize: 11 },
+  actionBtnRed: { borderColor: RED },
+  actionBtnTextRed: { color: RED },
+
+  numberBlock: { marginTop: 8 },
+  numberLabel: { fontSize: 12, fontWeight: '700', color: BLACK, marginBottom: 5 },
+  inputCompact: {
+    height: 42,
+    borderWidth: 1.5,
+    borderColor: BORDER,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    fontSize: 14,
+    color: BLACK,
+    backgroundColor: BG,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    backgroundColor: BG,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  infoLabel: { flex: 1, fontSize: 11.5, color: GREY },
+  infoValue: { fontSize: 12.5, fontWeight: '800', color: BLACK },
 
   agreeRow: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 18 },
   checkbox: {

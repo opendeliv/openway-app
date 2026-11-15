@@ -15,7 +15,12 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 
 import { RootStackParamList } from '../../../types/navigation';
-import { profileApi, ProfileUser, clearToken } from '../../../services/api';
+import {
+  profileApi,
+  ProfileUser,
+  clearToken,
+  authApi,
+} from '../../../services/api';
 import { captainsApi, Captain } from '../../../services/captainsApi';
 
 // Scroll karne par tab bar hide karne ke liye
@@ -174,11 +179,8 @@ export default function ProfileScreen() {
       return;
     }
 
-    if (isRejected) {
-      Alert.alert(
-        'Request Rejected',
-        'Aapki captain request approve nahi ho payi. Details ke liye Help & Support se contact karo.',
-      );
+       if (isRejected) {
+      navigation.navigate('CaptainRegister', { resubmit: true });
       return;
     }
 
@@ -190,15 +192,20 @@ export default function ProfileScreen() {
     navigation.navigate('EditProfile');
   };
 
-  const doLogout = async () => {
-    await clearToken();
+const doLogout = async () => {
+  // Pehle backend se session hatao (token abhi bhi memory me hai).
+  // Net na ho ya error aaye to bhi local logout hona chahiye.
+  try {
+    await authApi.logout();
+  } catch {}
 
-    navigation.reset({
-      index: 0,
-      routes: [{ name: 'Login' }],
-    });
-  };
+  await clearToken();
 
+  navigation.reset({
+    index: 0,
+    routes: [{ name: 'Login' }],
+  });
+};
   const onLogout = () => {
     Alert.alert('Logout', 'Kya aap logout karna chahte ho?', [
       { text: 'Cancel', style: 'cancel' },
@@ -236,9 +243,9 @@ export default function ProfileScreen() {
     bannerBtn = 'View Status';
   } else if (isRejected) {
     bannerTag = 'REQUEST REJECTED';
-    bannerTitle = 'Captain request rejected';
-    bannerSub = 'Support se contact karke details pucho';
-    bannerBtn = 'View Status';
+    bannerTitle = 'Fix your details';
+    bannerSub = 'Details sahi karke dobara request bhejo';
+    bannerBtn = 'Edit & Resubmit';
   } else if (isApproved) {
     bannerTag = 'CAPTAIN ACCOUNT';
     bannerTitle = 'Open Captain App';

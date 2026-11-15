@@ -139,7 +139,6 @@ export type ProfileUser = {
 /* =========================================================
    AUTH API
    ========================================================= */
-
 export const authApi = {
   /* Send OTP */
   sendOtp: (phone: string) =>
@@ -148,19 +147,39 @@ export const authApi = {
       .then((response) => response.data),
 
   /* Verify OTP */
-  verifyOtp: (phone: string, otp: string) =>
+  verifyOtp: (
+    phone: string,
+    otp: string,
+    deviceId: string,
+    deviceName?: string,
+  ) =>
     api
       .post<{
         token: string;
         user: User;
         isNewUser: boolean;
-      }>('/auth/verify-otp', { phone, otp })
+      }>('/auth/verify-otp', { phone, otp, deviceId, deviceName })
+      .then((response) => response.data),
+
+  /* Firebase login: idToken do, apna JWT lo */
+  firebaseLogin: (idToken: string, deviceId: string, deviceName?: string) =>
+    api
+      .post<{
+        token: string;
+        user: User;
+        isNewUser: boolean;
+      }>('/auth/firebase-login', { idToken, deviceId, deviceName })
+      .then((response) => response.data),
+
+  /* Logout: backend se session hatao */
+  logout: () =>
+    api
+      .post<{ message: string }>('/auth/logout')
       .then((response) => response.data),
 
   /* Logged-in user */
   me: () => api.get<User>('/auth/me').then((response) => response.data),
 };
-
 /* =========================================================
    PROFILE API
    ========================================================= */

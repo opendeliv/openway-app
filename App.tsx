@@ -12,6 +12,9 @@ import {
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import EditProfileScreen from './src/EditProfileScreen';
+import PrivacyPolicyScreen from './src/features/profile/PrivacyPolicyScreen';
+
+
 import LoginScreen from './src/features/auth/screens/LoginScreen';
 import HomeScreen from './src/features/home/screens/HomeScreen';
 import EditCaptainScreen from './src/EditCaptainScreen';
@@ -27,6 +30,8 @@ import CaptainRegisterScreen from './src/features/CaptainRegister';
 // Admin screens
 import AdminHomeScreen from './src/admin/AdminHomeScreen';
 import CaptainDetailScreen from './src/admin/CaptainDetailScreen';
+import BookingRouteScreen from './src/BookingRouteScreen'; // path adjust
+// ...
 import AdminProfileScreen from './src/admin/AdminProfileScreen';
 import {
   RootStackParamList,
@@ -65,6 +70,9 @@ function MainTabs() {
         component={HomeScreen}
         options={{ title: 'Home', tabBarIcon: icon('home', 'home-outline') }}
       />
+
+
+
       <Tab.Screen
         name="Profile"
         component={ProfileScreen}
@@ -165,11 +173,14 @@ export default function App() {
           <Stack.Screen name="MainTabs" component={MainTabs} />
           <Stack.Screen name="EditProfile" component={EditProfileScreen} />
           <Stack.Screen name="EditCaptain" component={EditCaptainScreen} />
+
+<Stack.Screen name="Booking" component={BookingRouteScreen} />
           <Stack.Screen name="RideTracking" component={RideTrackingRoute} />
           {/* Captain ki ride screen: Home se navigate('CaptainRide', { captainRideId }) */}
           <Stack.Screen name="CaptainRide" component={CaptainRideTrackingScreen} />
           <Stack.Screen name="CaptainRegister" component={CaptainRegisterScreen} />
           <Stack.Screen name="CaptainTabs" component={CaptainTabs} />
+          <Stack.Screen name="PrivacyPolicy" component={PrivacyPolicyScreen} />
           <Stack.Screen name="AdminTabs" component={AdminTabs} />
           {/* Admin: captain ki poori detail (tabs ke bahar, full screen) */}
           <Stack.Screen name="CaptainDetail" component={CaptainDetailScreen} />

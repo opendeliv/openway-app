@@ -15,13 +15,23 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithPhoneNumber,
+  signOut,
+} from '@react-native-firebase/auth';
 import { RootStackParamList } from '../../../types/navigation';
 import { authApi, saveToken } from '../../../services/api';
+import { getDeviceId, getDeviceName } from '../../../utils/deviceId';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Login'>;
 
-const OTP_LENGTH = 6; // backend sends a 6-digit OTP
-const RESEND_SECONDS = 30;
+// Firebase confirmation object type (works with modular API)
+type ConfirmationResult = Awaited<ReturnType<typeof signInWithPhoneNumber>>;
+
+const OTP_LENGTH = 6; // Firebase sends a 6-digit OTP
+const RESEND_SECONDS = 120;
 
 // Palette
 const BLUE = '#1F5EFF';
@@ -30,6 +40,65 @@ const NAVY = '#0B1B3F';
 const GREY = '#6B7280';
 const BORDER = '#E2E8F0';
 const RED = '#D93025';
+
+/** Firebase error code -> user friendly message */
+const firebaseError = (e: any): string => {
+  switch (e?.code) {
+    case 'auth/invalid-verification-code':
+      return 'Incorrect OTP';
+    case 'auth/code-expired':
+    case 'auth/session-expired':
+      return 'OTP expired, please request a new one';
+    case 'auth/too-many-requests':
+      return 'Too many attempts, try again later';
+    case 'auth/invalid-phone-number':
+      return 'Invalid mobile number';
+    case 'auth/network-request-failed':
+      return 'Check your internet connection';
+    default:
+      return e?.message ?? 'Something went wrong';
+  }
+};
+
+// ---------- DEBUG LOGGING (production se pehle hata dena) ----------
+const TAG = '[LoginOTP]';
+
+const log = (...args: any[]) => {
+  if (__DEV__) {
+    console.log(TAG, ...args);
+  }
+};
+
+/** Firebase config jo app ne actually load kiya hai (google-services.json se) */
+const logFirebaseConfig = () => {
+  try {
+    const app = getAuth().app;
+    log('Firebase app name:', app.name);
+    log('Firebase options:', JSON.stringify(app.options, null, 2));
+  } catch (err) {
+    log('Firebase config read failed:', err);
+  }
+};
+
+/** Firebase error ka poora detail */
+const logFirebaseError = (where: string, e: any) => {
+  log(
+    `${where} FAILED`,
+    JSON.stringify(
+      {
+        code: e?.code,
+        message: e?.message,
+        nativeErrorCode: e?.nativeErrorCode,
+        nativeErrorMessage: e?.nativeErrorMessage,
+        userInfo: e?.userInfo,
+        name: e?.name,
+      },
+      null,
+      2,
+    ),
+  );
+};
+// -------------------------------------------------------------------
 
 /** Clean hero: one main service in the center, other services orbiting around it (Views only) */
 function HeroIllustration() {
@@ -40,27 +109,27 @@ function HeroIllustration() {
       <View style={ill.glow} />
 
       {/* small decorative dots */}
-      <View style={[ill.dot, { left: 58, top: 28 }]} />
-      <View style={[ill.dot, { left: 246, top: 124, width: 6, height: 6 }]} />
-      <View style={[ill.dot, { left: 268, top: 44, width: 5, height: 5 }]} />
+      <View style={[ill.dot, ill.dot1]} />
+      <View style={[ill.dot, ill.dot2]} />
+      <View style={[ill.dot, ill.dot3]} />
 
       {/* center: Ride */}
       <View style={ill.hub}>
         <Text style={ill.hubIcon}>🛵</Text>
       </View>
-      <Text style={[ill.label, { left: 111, width: 78, top: 124 }]}>Ride</Text>
+      <Text style={[ill.label, ill.labelRide]}>Ride</Text>
 
       {/* orbiting: Parcel */}
-      <View style={[ill.chip, { left: 51, top: 56 }]}>
+      <View style={[ill.chip, ill.chipParcel]}>
         <Text style={ill.chipIcon}>📦</Text>
       </View>
-      <Text style={[ill.label, { left: 45, width: 60, top: 108 }]}>Parcel</Text>
+      <Text style={[ill.label, ill.labelParcel]}>Parcel</Text>
 
       {/* orbiting: Goods */}
-      <View style={[ill.chip, { left: 201, top: 56 }]}>
+      <View style={[ill.chip, ill.chipGoods]}>
         <Text style={ill.chipIcon}>🚚</Text>
       </View>
-      <Text style={[ill.label, { left: 195, width: 60, top: 108 }]}>Goods</Text>
+      <Text style={[ill.label, ill.labelGoods]}>Goods</Text>
 
       {/* orbiting: location */}
       <View style={ill.chipSmall}>
@@ -78,11 +147,28 @@ export default function LoginScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [phoneFocused, setPhoneFocused] = useState(true);
-  const [devOtp, setDevOtp] = useState(''); // only set by backend for invited testers
   const otpInputRef = useRef<React.ComponentRef<typeof TextInput>>(null);
+  // Firebase confirmation object, needed to verify the OTP
+  const confirmRef = useRef<ConfirmationResult | null>(null);
 
   const isPhoneValid = phone.length === 10;
   const isOtpValid = otp.length === OTP_LENGTH;
+
+  const goToPhoneStep = () => {
+    setOtp('');
+    setError('');
+    confirmRef.current = null;
+    setStep('phone');
+  };
+
+  // DEBUG: Firebase config + auth state changes (auto-verification yahan dikhega)
+  useEffect(() => {
+    logFirebaseConfig();
+    const unsub = onAuthStateChanged(getAuth(), (u) => {
+      log('onAuthStateChanged ->', u ? { uid: u.uid, phone: u.phoneNumber } : 'signed out');
+    });
+    return unsub;
+  }, []);
 
   // On the OTP step, Android back button goes back to the number step
   useEffect(() => {
@@ -98,17 +184,12 @@ export default function LoginScreen({ navigation }: Props) {
 
   // resend countdown
   useEffect(() => {
-    if (step !== 'otp' || seconds <= 0) return;
+    if (step !== 'otp' || seconds <= 0) {
+      return;
+    }
     const t = setTimeout(() => setSeconds((s) => s - 1), 1000);
     return () => clearTimeout(t);
   }, [step, seconds]);
-
-  const goToPhoneStep = () => {
-    setOtp('');
-    setDevOtp('');
-    setError('');
-    setStep('phone');
-  };
 
   const onChangePhone = (text: string) => {
     setError('');
@@ -120,51 +201,96 @@ export default function LoginScreen({ navigation }: Props) {
     setOtp(text.replace(/[^0-9]/g, '').slice(0, OTP_LENGTH));
   };
 
+  // Step 1: Firebase sends the OTP SMS
   const onSendOtp = async () => {
-    if (!isPhoneValid || loading) return;
+    if (!isPhoneValid || loading) {
+      return;
+    }
     setLoading(true);
     setError('');
     try {
-      const res: any = await authApi.sendOtp(phone);
-      setDevOtp(res?.devOtp ?? '');
+      const authInstance = getAuth();
+      log('SEND OTP start ->', `+91${phone}`);
+      confirmRef.current = await signInWithPhoneNumber(
+        authInstance,
+        `+91${phone}`,
+      );
+      log('SEND OTP success. verificationId:', confirmRef.current?.verificationId);
       setOtp('');
       setSeconds(RESEND_SECONDS);
       setStep('otp');
     } catch (e: any) {
-      setError(e.message);
+      logFirebaseError('SEND OTP', e);
+      setError(firebaseError(e));
     } finally {
       setLoading(false);
     }
   };
-const onVerify = async () => {
-  if (!isOtpValid || loading) return;
-  setLoading(true);
-  setError('');
-  try {
-    const { token, user } = await authApi.verifyOtp(phone, otp);
-    await saveToken(token);
-    // Admin ko alag tabs, baaki sab ko normal app
-    navigation.replace(user?.role === 'ADMIN' ? 'AdminTabs' : 'MainTabs');
-  } catch (e: any) {
-    setError(e.message);
-    setOtp('');
-    otpInputRef.current?.focus();
-    setLoading(false);
-  }
-};
 
-  const onResend = async () => {
-    if (seconds > 0 || loading) return;
+  // Step 2: verify OTP with Firebase, then exchange idToken for our own JWT
+  const onVerify = async () => {
+    if (!isOtpValid || loading) {
+      return;
+    }
     setLoading(true);
     setError('');
     try {
-      const res: any = await authApi.sendOtp(phone);
-      setDevOtp(res?.devOtp ?? '');
+      const authInstance = getAuth();
+      log('VERIFY start. otp length:', otp.length, 'confirmRef present:', !!confirmRef.current);
+      const cred = await confirmRef.current?.confirm(otp);
+      log('VERIFY confirm() returned user:', cred?.user ? cred.user.uid : null);
+      // On Android, auto-verification can sign in before confirm() returns a user
+      const fbUser = cred?.user ?? authInstance.currentUser;
+      if (!fbUser) {
+        throw new Error('Verification failed, please try again');
+      }
+      log('Firebase user:', { uid: fbUser.uid, phone: fbUser.phoneNumber });
+      const idToken = await fbUser.getIdToken();
+      log('idToken received, length:', idToken?.length);
+
+      log('Calling backend firebaseLogin...');
+      const deviceId = await getDeviceId();
+      const { token, user } = await authApi.firebaseLogin(
+        idToken,
+        deviceId,
+        getDeviceName(),
+      );
+      log('Backend login success. role:', user?.role, 'jwt length:', token?.length);
+      await saveToken(token);
+      await signOut(authInstance); // we use our own JWT from here on
+      // Admin ko alag tabs, baaki sab ko normal app
+      navigation.replace(user?.role === 'ADMIN' ? 'AdminTabs' : 'MainTabs');
+    } catch (e: any) {
+      logFirebaseError('VERIFY / BACKEND LOGIN', e);
+      // Firebase errors have a code; backend errors are plain Error(message)
+      setError(e?.code ? firebaseError(e) : e.message);
+      setOtp('');
+      otpInputRef.current?.focus();
+      setLoading(false);
+    }
+  };
+
+  const onResend = async () => {
+    if (seconds > 0 || loading) {
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      const authInstance = getAuth();
+      log('RESEND OTP start ->', `+91${phone}`);
+      confirmRef.current = await signInWithPhoneNumber(
+        authInstance,
+        `+91${phone}`,
+        true, // force resend
+      );
+      log('RESEND OTP success. verificationId:', confirmRef.current?.verificationId);
       setOtp('');
       setSeconds(RESEND_SECONDS);
       otpInputRef.current?.focus();
     } catch (e: any) {
-      setError(e.message);
+      logFirebaseError('RESEND OTP', e);
+      setError(firebaseError(e));
     } finally {
       setLoading(false);
     }
@@ -172,7 +298,8 @@ const onVerify = async () => {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <StatusBar barStyle="light-content" backgroundColor={BLUE} />
+      {/* container already BLUE hai, isliye sirf barStyle kaafi hai */}
+      <StatusBar barStyle="light-content" />
 
       {/* Blue hero */}
       <View style={styles.header}>
@@ -183,7 +310,6 @@ const onVerify = async () => {
           <Text style={styles.brand}>OpenDeliv</Text>
         </View>
         <Text style={styles.tagline}>Rides, parcels and goods in one app</Text>
-
 
         <View style={styles.illustration}>
           <HeroIllustration />
@@ -273,13 +399,6 @@ const onVerify = async () => {
                     Change
                   </Text>
                 </Text>
-
-                {!!devOtp && (
-                  <Pressable style={styles.devBanner} onPress={() => setOtp(devOtp)}>
-                    <Text style={styles.devBannerLabel}>Test OTP (tap to fill)</Text>
-                    <Text style={styles.devBannerCode}>{devOtp}</Text>
-                  </Pressable>
-                )}
 
                 {/* OTP boxes + hidden input */}
                 <Pressable
@@ -384,6 +503,9 @@ const ill = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: 'rgba(255,255,255,0.55)',
   },
+  dot1: { left: 58, top: 28 },
+  dot2: { left: 246, top: 124, width: 6, height: 6, borderRadius: 3 },
+  dot3: { left: 268, top: 44, width: 5, height: 5, borderRadius: 2.5 },
 
   hub: {
     position: 'absolute',
@@ -417,6 +539,8 @@ const ill = StyleSheet.create({
     shadowOffset: { width: 0, height: 4 },
     elevation: 6,
   },
+  chipParcel: { left: 51, top: 56 },
+  chipGoods: { left: 201, top: 56 },
   chipIcon: { fontSize: 22 },
 
   chipSmall: {
@@ -444,6 +568,9 @@ const ill = StyleSheet.create({
     fontWeight: '700',
     color: '#FFFFFF',
   },
+  labelRide: { left: 111, width: 78, top: 124 },
+  labelParcel: { left: 45, width: 60, top: 108 },
+  labelGoods: { left: 195, width: 60, top: 108 },
 });
 
 const styles = StyleSheet.create({
@@ -543,16 +670,6 @@ const styles = StyleSheet.create({
   boxError: { borderColor: RED, backgroundColor: '#FEF2F2' },
   boxText: { fontSize: 24, fontWeight: '800', color: NAVY },
   hiddenInput: { position: 'absolute', width: '100%', height: '100%', opacity: 0 },
-
-  devBanner: {
-    backgroundColor: BLUE_LIGHT,
-    borderRadius: 12,
-    paddingVertical: 10,
-    alignItems: 'center',
-    marginBottom: 18,
-  },
-  devBannerLabel: { fontSize: 12, color: GREY, fontWeight: '600' },
-  devBannerCode: { fontSize: 20, color: BLUE, fontWeight: '800', letterSpacing: 4, marginTop: 2 },
 
   error: { color: RED, fontSize: 13, marginBottom: 12, fontWeight: '500' },
 

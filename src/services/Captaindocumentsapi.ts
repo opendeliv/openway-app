@@ -1,15 +1,11 @@
 import { api } from './api';
 
 export type CaptainDocType =
-  | 'AADHAAR'
   | 'SELFIE'
+  | 'AADHAAR'
   | 'PAN'
   | 'DRIVING_LICENSE'
-  | 'RC'
-  | 'INSURANCE'
-  | 'PERMIT'
-  | 'VEHICLE_PHOTO';
-
+  | 'RC';
 export type UploadDocumentPayload = {
   type: CaptainDocType;
   fileUrl: string;

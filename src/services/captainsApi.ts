@@ -122,7 +122,8 @@ export const captainsApi = {
           (status >= 200 && status < 300) || status === 404,
       })
       .then((response) => (response.status === 404 ? null : response.data)),
-
+  resubmitCaptain: (data: CreateCaptainPayload) =>
+    api.patch('/captains/me/resubmit', data).then((response) => response.data),
   /* PATCH /captains/me */
   updateCaptain: (data: UpdateCaptainInput) =>
     api.patch<Captain>('/captains/me', data).then((response) => response.data),
