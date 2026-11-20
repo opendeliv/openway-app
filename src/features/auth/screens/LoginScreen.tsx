@@ -161,6 +161,10 @@ export default function LoginScreen({ navigation }: Props) {
     setStep('phone');
   };
 
+  // Terms of Service and Privacy Policy both open the PrivacyPolicy screen
+  // (features/profile/PrivacyPolicyScreen.tsx)
+  const openPolicy = () => navigation.navigate('PrivacyPolicy');
+
   // DEBUG: Firebase config + auth state changes (auto-verification yahan dikhega)
   useEffect(() => {
     logFirebaseConfig();
@@ -309,7 +313,7 @@ export default function LoginScreen({ navigation }: Props) {
           </View>
           <Text style={styles.brand}>OpenDeliv</Text>
         </View>
-        <Text style={styles.tagline}>Rides, parcels and goods in one app</Text>
+        <Text style={styles.tagline}>Send More. Receive More.</Text>
 
         <View style={styles.illustration}>
           <HeroIllustration />
@@ -375,7 +379,14 @@ export default function LoginScreen({ navigation }: Props) {
                 </View>
 
                 <Text style={styles.terms}>
-                  By continuing, you agree to our Terms of Service and Privacy Policy
+                  By continuing, you agree to our{' '}
+                  <Text style={styles.termsLink} onPress={openPolicy}>
+                    Terms of Service
+                  </Text>{' '}
+                  and{' '}
+                  <Text style={styles.termsLink} onPress={openPolicy}>
+                    Privacy Policy
+                  </Text>
                 </Text>
               </>
             ) : (
@@ -694,6 +705,7 @@ const styles = StyleSheet.create({
     marginTop: 14,
     lineHeight: 18,
   },
+  termsLink: { color: BLUE, fontWeight: '700', textDecorationLine: 'underline' },
   resendRow: { alignItems: 'center', marginTop: 22 },
   resendWait: { fontSize: 14, color: GREY },
   resend: { fontSize: 15, fontWeight: '800', color: BLUE },

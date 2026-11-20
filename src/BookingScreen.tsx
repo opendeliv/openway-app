@@ -40,28 +40,34 @@ const MAP_H = SNAP_HALF + 40; // map ki fixed height (sheet ke peeche tak)
 // route ko default visible patti ke andar fit karne ke liye upar-neeche ka padding
 const FIT_PAD_V = (MAP_H - SNAP_TOP) / 2;
 
-type Category = 'CAB' | 'BIKE' | 'PARCEL' | 'GOODS';
+type Category = 'PARCEL' | 'GOODS';
 
-// Ab app me sirf 2 mode hain: Parcel aur Goods (Ride / Passenger band hain)
+// App me sirf 2 mode hain: Parcel aur Goods
 type Mode = 'parcel' | 'goods';
 
 const MODE_LABEL: Record<Mode, string> = { parcel: 'Parcel', goods: 'Goods' };
 const MODE_EMOJI: Record<Mode, string> = { parcel: '📦', goods: '🚚' };
 const MODE_CATEGORY: Record<Mode, Category> = { parcel: 'PARCEL', goods: 'GOODS' };
 
-// Home ka vehicle (bike / auto / cab / goods) -> kis mode me kaun se groups milenge
+// Home ka vehicle (bike / auto / walk / goods / parcel / order) -> kis mode me kaun se groups milenge
 const VEHICLE_MODES: Record<string, Partial<Record<Mode, string[]>>> = {
   bike: { parcel: ['bike'] },
-  auto: { parcel: ['auto'], goods: ['auto'] },
-  cab: { parcel: ['cab'] },
-  goods: { goods: ['auto', 'truck'] },
-  // "Send now": sab parcel vehicles + Goods ek hi jagah
-  parcel: { parcel: ['walk', 'cycle', 'bike', 'auto', 'cab'] },
+  // Auto: sirf parcel (Parcel / Goods tabs nahi dikhenge)
+  auto: { parcel: ['auto'] },
+  // Walk group (Cycle + Walk). 'cycle' bhi chalega agar Home se wahi bhej rahe ho
+  walk: { parcel: ['walk'] },
+  cycle: { parcel: ['walk'] },
+  // Goods: sirf Tata Ace + Pickup
+  goods: { goods: ['truck'] },
+  // "Send now": Walk(Cycle, Walk), Bike(Bike, Scooty), Auto(Auto, E-Auto) + Goods
+  parcel: { parcel: ['walk', 'bike', 'auto'] },
+  // "Order now": sirf Walk(Cycle, Walk), Bike(Bike, Scooty)
+  order: { parcel: ['walk', 'bike'] },
 };
 
 // Variant = the real vehicleType sent to the backend (id == backend vehicleType)
 type Variant = { id: string; name: string; emoji: string; sub: string; icon?: string };
-// Group = the top selector (Walk/Cycle/Bike/Auto/Cab, Auto/Truck ...)
+// Group = the top selector (Walk / Bike / Auto / Truck ...)
 type Group = {
   id: string;
   name: string;
@@ -76,49 +82,40 @@ type Group = {
 // ---------------------------------------------------------------------------
 // VEHICLE CATALOG
 // ---------------------------------------------------------------------------
+// Bike group: sirf Bike aur Scooty
 const bikeVariants = (sub?: string): Variant[] => [
-  { id: 'lite', name: 'Lite Bike', emoji: '🛵', sub: sub ?? 'Budget ride' },
-  { id: 'bike', name: 'Super Bike', emoji: '🏍️', sub: sub ?? '1 seat' },
+  { id: 'bike', name: 'Bike', emoji: '🏍️', sub: sub ?? '1 seat' },
   { id: 'scooty', name: 'Scooty', emoji: '🛵', sub: sub ?? 'Easy & quick' },
 ];
 
+// Walk group: Cycle aur Walk
+const walkVariants = (): Variant[] => [
+  { id: 'cycle', name: 'Cycle', emoji: '🚲', sub: 'Upto 5 kg', icon: 'pcycle' },
+  { id: 'walk', name: 'Walk', emoji: '🚶', sub: 'Upto 3 kg', icon: 'pwalk' },
+];
+
+// Auto group: Auto aur E-Auto
 const autoVariants = (autoIcon: string, sub?: string): Variant[] => [
   { id: 'auto', name: 'Auto', emoji: '🛺', sub: sub ?? '3 seats', icon: autoIcon },
   { id: 'e_rickshaw', name: 'E-Auto', emoji: '🛺', sub: sub ?? 'Electric', icon: 'eauto' },
 ];
 
-const cabVariants = (sub?: string): Variant[] => [
-  { id: 'mini_van', name: 'Mini Van', emoji: '🚐', sub: sub ?? '6 seats' },
-  { id: 'suv', name: 'SUV', emoji: '🚙', sub: sub ?? '6 seats' },
-  { id: 'utility_van', name: 'Utility Van', emoji: '🚐', sub: sub ?? 'Cargo space' },
-];
-
-// Goods vehicles (truck group)
+// Goods vehicles (truck group): sirf Tata Ace + Pickup
 const goodsTruckVariants = (): Variant[] => [
   { id: 'tata_ace', name: 'Tata Ace', emoji: '🚚', sub: 'Upto 750 kg', icon: 'ace' },
-  { id: 'eicher', name: 'Eicher', emoji: '🚛', sub: 'Upto 2.5 ton', icon: 'eicher' },
   { id: 'pickup', name: 'Pickup', emoji: '🛻', sub: 'Upto 1.5 ton', icon: 'pickup' },
-  { id: 'mahindra_furio', name: 'Mahindra Furio', emoji: '🚛', sub: 'Upto 5 ton', icon: 'furio' },
 ];
 
-// Sirf parcel + goods (ride wale entries hata diye gaye hain)
+// Sirf parcel + goods
 const CATALOG: Record<Mode, Group[]> = {
   parcel: [
     {
       id: 'walk',
       name: 'Walk',
-      emoji: '🚶',
-      sub: 'Upto 3 kg',
-      icon: 'pwalk',
-      variants: [{ id: 'walk', name: 'Walk', emoji: '🚶', sub: 'Upto 3 kg', icon: 'pwalk' }],
-    },
-    {
-      id: 'cycle',
-      name: 'Cycle',
       emoji: '🚲',
-      sub: 'Upto 5 kg',
-      icon: 'pcycle',
-      variants: [{ id: 'cycle', name: 'Cycle', emoji: '🚲', sub: 'Upto 5 kg', icon: 'pcycle' }],
+      sub: 'Cycle & Walk',
+      icon: 'pcycle', // Walk group me cycle ka icon
+      variants: walkVariants(),
     },
     {
       id: 'bike',
@@ -136,30 +133,14 @@ const CATALOG: Record<Mode, Group[]> = {
       icon: 'pauto',
       variants: autoVariants('auto', 'Upto 50 kg'),
     },
-    {
-      id: 'cab',
-      name: 'Cab',
-      emoji: '🚕',
-      sub: 'Upto 100 kg',
-      icon: 'group_cab',
-      variants: cabVariants('Upto 100 kg'),
-    },
   ],
 
   goods: [
     {
-      id: 'auto',
-      name: 'Auto',
-      emoji: '🛺',
-      sub: 'Upto 300 kg',
-      icon: 'gauto',
-      variants: autoVariants('gauto', 'Upto 300 kg'),
-    },
-    {
       id: 'truck',
       name: 'Truck',
       emoji: '🚚',
-      sub: 'Tata Ace, Eicher, Pickup',
+      sub: 'Tata Ace, Pickup',
       icon: 'ace',
       variants: goodsTruckVariants(),
     },
@@ -174,19 +155,15 @@ const getGroups = (vehicle: string, m: Mode): Group[] => {
   return all.filter((g) => ids.includes(g.id));
 };
 
-// "Send now" ki combined list: Walk, Cycle, Bike, Auto, Cab (parcel) + Goods
+// "Send now" ki combined list: Walk(Cycle, Walk), Bike(Bike, Scooty), Auto(Auto, E-Auto) + Goods
 const GOODS_COMBINED_GROUP: Group = {
   id: 'goods',
   name: 'Goods',
   emoji: '🚚',
-  sub: 'Heavy items',
+  sub: 'Tata Ace, Pickup',
   icon: 'ace',
   mode: 'goods',
-  variants: [
-    { id: 'auto', name: 'Auto', emoji: '🛺', sub: 'Upto 300 kg', icon: 'gauto' },
-    { id: 'e_rickshaw', name: 'E-Auto', emoji: '🛺', sub: 'Upto 300 kg', icon: 'eauto' },
-    ...goodsTruckVariants(),
-  ],
+  variants: goodsTruckVariants(),
 };
 
 const getCombinedGroups = (allowed?: string[]): Group[] => {
@@ -198,8 +175,6 @@ const getCombinedGroups = (allowed?: string[]): Group[] => {
 
 // ---------------------------------------------------------------------------
 // FARE RATES (estimate). fare = max(minFare, baseFare + (km - baseKm) * perKm)
-// NOTE: the rates that were already in the app are unchanged. Rates for the new
-// variants (mini_van, utility_van, eicher, mahindra_furio) are my estimate - change them as needed.
 // ---------------------------------------------------------------------------
 type Rate = { baseFare: number; baseKm: number; perKm: number; minFare: number };
 const rate = (baseFare: number, baseKm: number, perKm: number): Rate => ({
@@ -210,37 +185,17 @@ const rate = (baseFare: number, baseKm: number, perKm: number): Rate => ({
 });
 
 const RATES: Record<Category, Record<string, Rate>> = {
-  BIKE: {
-    lite: rate(20, 2, 5),
-    bike: rate(25, 2, 6.5),
-    scooty: rate(22, 2, 6),
-  },
-  CAB: {
-    mini_van: rate(90, 2, 15),
-    suv: rate(110, 2, 20),
-    utility_van: rate(100, 2, 17),
-    auto: rate(30, 1.5, 11),
-    e_rickshaw: rate(25, 1.5, 9),
-  },
   PARCEL: {
     walk: rate(25, 1.5, 5),
     cycle: rate(35, 2, 6),
-    lite: rate(30, 2, 6),
     bike: rate(40, 2, 8),
     scooty: rate(35, 2, 7),
     auto: rate(80, 2, 13),
     e_rickshaw: rate(70, 2, 12),
-    mini_van: rate(110, 2, 15),
-    suv: rate(150, 2, 21),
-    utility_van: rate(130, 2, 18),
   },
   GOODS: {
-    auto: rate(150, 2, 15),
-    e_rickshaw: rate(130, 2, 13),
     tata_ace: rate(300, 3, 20),
     pickup: rate(450, 3, 28),
-    eicher: rate(600, 3, 35),
-    mahindra_furio: rate(800, 3, 42),
   },
 };
 
@@ -253,9 +208,9 @@ const calcFare = (category: Category, vehicleId: string, km?: number | null): nu
 };
 
 // Fare offer limits (based on the estimate) and step
-const FARE_STEP = 5;
-const MIN_OFFER_RATIO = 0.7; // not below 70% of the estimate
-const MAX_OFFER_RATIO = 2; // not above 2x the estimate
+const FARE_STEP = 10;
+const MIN_OFFER_RATIO = 0.3; // not below 30% of the estimate
+const MAX_OFFER_RATIO = 5; // not above 5x the estimate
 
 const TITLES: Record<Mode, string> = {
   parcel: 'Parcel Delivery',
@@ -265,7 +220,7 @@ const TITLES: Record<Mode, string> = {
 // Parcel size based on the vehicle
 const getParcelSize = (vehicleId: string): 'SMALL' | 'MEDIUM' | 'LARGE' => {
   if (vehicleId === 'walk' || vehicleId === 'cycle') return 'SMALL';
-  if (vehicleId === 'lite' || vehicleId === 'bike' || vehicleId === 'scooty') return 'MEDIUM';
+  if (vehicleId === 'bike' || vehicleId === 'scooty') return 'MEDIUM';
   return 'LARGE';
 };
 
@@ -279,25 +234,37 @@ const ITEMS: Record<Mode, Item[]> = {
     { id: 'docs', label: 'Documents', emoji: '📄', groupId: 'walk', vehicleId: 'walk' },
     { id: 'keys', label: 'Keys', emoji: '🔑', groupId: 'walk', vehicleId: 'walk' },
     { id: 'meds', label: 'Medicines', emoji: '💊', groupId: 'walk', vehicleId: 'walk' },
-    { id: 'food', label: 'Tiffin / Food', emoji: '🍱', groupId: 'cycle', vehicleId: 'cycle' },
-    { id: 'gift', label: 'Gift / Cake', emoji: '🎁', groupId: 'cycle', vehicleId: 'cycle' },
+    { id: 'food', label: 'Tiffin / Food', emoji: '🍱', groupId: 'walk', vehicleId: 'cycle' },
+    { id: 'gift', label: 'Gift / Cake', emoji: '🎁', groupId: 'walk', vehicleId: 'cycle' },
     { id: 'clothes', label: 'Clothes', emoji: '👕', groupId: 'bike', vehicleId: 'bike' },
     { id: 'books', label: 'Books', emoji: '📚', groupId: 'bike', vehicleId: 'bike' },
-    { id: 'gadgets', label: 'Mobile / Gadgets', emoji: '📱', groupId: 'bike', vehicleId: 'bike' },
+    { id: 'gadgets', label: 'Mobile / Gadgets', emoji: '📱', groupId: 'bike', vehicleId: 'scooty' },
     { id: 'grocery', label: 'Groceries', emoji: '🛒', groupId: 'bike', vehicleId: 'bike' },
     { id: 'bigbox', label: 'Big Box', emoji: '📦', groupId: 'auto', vehicleId: 'e_rickshaw' },
   ],
   goods: [
-    { id: 'stock', label: 'Shop Stock', emoji: '🛍️', groupId: 'auto', vehicleId: 'auto' },
-    { id: 'cylinder', label: 'Gas Cylinder', emoji: '🛢️', groupId: 'auto', vehicleId: 'auto' },
-    { id: 'mattress', label: 'Mattress', emoji: '🛏️', groupId: 'auto', vehicleId: 'auto' },
+    { id: 'stock', label: 'Shop Stock', emoji: '🛍️', groupId: 'truck', vehicleId: 'tata_ace' },
+    { id: 'cylinder', label: 'Gas Cylinder', emoji: '🛢️', groupId: 'truck', vehicleId: 'tata_ace' },
+    { id: 'mattress', label: 'Mattress', emoji: '🛏️', groupId: 'truck', vehicleId: 'tata_ace' },
     { id: 'appliance', label: 'Washing Machine / Fridge', emoji: '🧊', groupId: 'truck', vehicleId: 'tata_ace' },
     { id: 'furniture', label: 'Furniture', emoji: '🪑', groupId: 'truck', vehicleId: 'tata_ace' },
-    { id: 'shifting', label: 'Household Shifting', emoji: '🏠', groupId: 'truck', vehicleId: 'eicher' },
+    { id: 'shifting', label: 'Household Shifting', emoji: '🏠', groupId: 'truck', vehicleId: 'pickup' },
     { id: 'material', label: 'Construction Material', emoji: '🧱', groupId: 'truck', vehicleId: 'pickup' },
-    { id: 'bulk', label: 'Bulk Goods', emoji: '📦', groupId: 'truck', vehicleId: 'mahindra_furio' },
+    { id: 'bulk', label: 'Bulk Goods', emoji: '📦', groupId: 'truck', vehicleId: 'pickup' },
   ],
 };
+
+// "Order now" ke suggestions: food, veg, docs etc. (sirf walk / cycle / scooty / bike)
+const ORDER_ITEMS: Item[] = [
+  { id: 'food', label: 'Food', emoji: '🍔', groupId: 'bike', vehicleId: 'bike' },
+  { id: 'veg', label: 'Vegetables', emoji: '🥦', groupId: 'walk', vehicleId: 'cycle' },
+  { id: 'fruits', label: 'Fruits', emoji: '🍎', groupId: 'walk', vehicleId: 'cycle' },
+  { id: 'docs', label: 'Documents', emoji: '📄', groupId: 'walk', vehicleId: 'walk' },
+  { id: 'meds', label: 'Medicines', emoji: '💊', groupId: 'walk', vehicleId: 'walk' },
+  { id: 'dairy', label: 'Milk / Dairy', emoji: '🥛', groupId: 'walk', vehicleId: 'walk' },
+  { id: 'grocery', label: 'Groceries', emoji: '🛒', groupId: 'bike', vehicleId: 'scooty' },
+  { id: 'cake', label: 'Cake / Bakery', emoji: '🎂', groupId: 'walk', vehicleId: 'cycle' },
+];
 
 // Used if no pickup comes from Home.
 const DEFAULT_PICKUP: Place = {
@@ -337,7 +304,7 @@ const VehicleIcon = ({
 };
 
 type Props = {
-  // Home ka vehicle: 'bike' | 'auto' | 'cab' | 'goods'
+  // Home ka vehicle: 'bike' | 'auto' | 'walk' | 'goods' | 'parcel' | 'order'
   service: string;
   // sirf ye categories allowed hain (e.g. ['PARCEL', 'GOODS']). Na do to sab allowed.
   allowedCategories?: string[];
@@ -349,6 +316,8 @@ type Props = {
   // when coming from Home, pickup / drop are already filled
   initialPickup?: Place;
   initialDrop?: Place | null;
+  initialReceiverName?: string;
+  initialReceiverPhone?: string;
 };
 
 export default function BookingScreen({
@@ -358,12 +327,15 @@ export default function BookingScreen({
   onOpenTerms,
   onRideCreated,
   initialPickup,
+  initialReceiverName,
+  initialReceiverPhone,
   initialDrop,
 }: Props) {
   const vehicle = service;
+  // "Order now" se aaye ho to order mode (walk / cycle / scooty / bike + order suggestions)
+  const isOrder = vehicle === 'order';
   const needsReceiver = true; // ab sirf parcel / goods hain, receiver hamesha chahiye
 
-  // Is vehicle ke liye kaun se modes (Parcel / Goods) allowed hain
   // "Send now" (vehicle = 'parcel'): sab vehicles ek hi list me, tabs nahi
   const combined = vehicle === 'parcel';
   const modes: Mode[] = combined
@@ -387,11 +359,16 @@ export default function BookingScreen({
   const category = MODE_CATEGORY[activeMode];
 
   // Sirf wahi items jo is vehicle ke groups me aate hain
-  const items: Item[] = combined
+  const baseItems: Item[] = combined
     ? activeMode === 'goods'
       ? ITEMS.goods.map((it) => ({ ...it, groupId: 'goods' }))
       : ITEMS.parcel
-    : (ITEMS[mode] ?? []).filter((it) => groups.some((g) => g.id === it.groupId));
+    : isOrder
+    ? ORDER_ITEMS
+    : ITEMS[mode] ?? [];
+  const items: Item[] = combined
+    ? baseItems
+    : baseItems.filter((it) => groups.some((g) => g.id === it.groupId));
   const [itemId, setItemId] = useState<string | null>(null);
 
   // Parcel / goods details
@@ -399,6 +376,11 @@ export default function BookingScreen({
   const [receiverName, setReceiverName] = useState('');
   const [receiverPhone, setReceiverPhone] = useState('');
   const [submitted, setSubmitted] = useState(false);
+
+  // 2 steps: 1 = route + vehicle + parcel, 2 = receiver details
+  const [step, setStep] = useState<1 | 2>(1);
+  const [descTried, setDescTried] = useState(false);
+  const scrollRef = useRef<ScrollView>(null);
 
   // "I am the receiver" tick
   const [useMyDetails, setUseMyDetails] = useState(false);
@@ -505,6 +487,10 @@ export default function BookingScreen({
   const [offerFare, setOfferFare] = useState<number | null>(null);
   const finalFare = offerFare ?? estimatedFare;
 
+  // tap on the amount to type your own price
+  const [fareEditing, setFareEditing] = useState(false);
+  const [fareText, setFareText] = useState('');
+
   const minOffer =
     estimatedFare != null ? Math.max(1, Math.round(estimatedFare * MIN_OFFER_RATIO)) : null;
   const maxOffer =
@@ -518,6 +504,15 @@ export default function BookingScreen({
   const changeFare = (delta: number) => {
     if (finalFare == null || minOffer == null || maxOffer == null) return;
     const next = Math.min(maxOffer, Math.max(minOffer, finalFare + delta));
+    setOfferFare(next === estimatedFare ? null : next);
+  };
+
+  const commitFare = () => {
+    setFareEditing(false);
+    if (estimatedFare == null || minOffer == null || maxOffer == null) return;
+    const n = parseInt(fareText.replace(/\D/g, ''), 10);
+    if (!isFinite(n)) return;
+    const next = Math.min(maxOffer, Math.max(minOffer, n));
     setOfferFare(next === estimatedFare ? null : next);
   };
 
@@ -536,7 +531,9 @@ export default function BookingScreen({
   }, []);
 
   const routeMode =
-    vehicle === 'bike' || (combined && group?.id === 'bike') ? 'TWO_WHEELER' : 'DRIVE';
+    vehicle === 'bike' || (combined && group?.id === 'bike') || (isOrder && group?.id === 'bike')
+      ? 'TWO_WHEELER'
+      : 'DRIVE';
 
   // get the route again when pickup / drop / vehicle changes
   useEffect(() => {
@@ -598,7 +595,9 @@ export default function BookingScreen({
   const errors = {
     parcelDescription:
       needsReceiver && parcelDescription.trim().length < 2
-        ? 'Describe what you are sending or pick an item above'
+        ? isOrder
+          ? 'Describe what you want to order or pick an item above'
+          : 'Describe what you are sending or pick an item above'
         : '',
     receiverName:
       needsReceiver && receiverName.trim().length < 3
@@ -622,9 +621,8 @@ export default function BookingScreen({
   };
 
   const onItemPress = (item: Item) => {
+    // sirf description bharta hai, vehicle user khud select karega
     setItemId(item.id);
-    setGroupId(item.groupId);
-    setSelectedId(item.vehicleId);
     setParcelDescription(item.label);
   };
 
@@ -674,6 +672,35 @@ export default function BookingScreen({
     }
   };
 
+  // Step 1 -> Step 2
+  const onContinue = () => {
+    if (!selected) {
+      Alert.alert('Select vehicle', 'Please select a vehicle first');
+      return;
+    }
+    if (!drop) {
+      Alert.alert('Drop location', 'Please choose a drop location first');
+      return;
+    }
+    if (finalFare == null || !route) {
+      Alert.alert('Fare', 'Could not calculate the fare, please check the route again');
+      return;
+    }
+    setDescTried(true);
+    if (errors.parcelDescription) return;
+    setStep(2);
+    scrollRef.current?.scrollTo({ y: 0, animated: false });
+  };
+
+  const handleBack = () => {
+    if (step === 2) {
+      setStep(1);
+      scrollRef.current?.scrollTo({ y: 0, animated: false });
+    } else {
+      onBack();
+    }
+  };
+
   const onBook = async () => {
     if (booking) return;
 
@@ -693,7 +720,7 @@ export default function BookingScreen({
     }
 
     setSubmitted(true);
-    if (Object.values(errors).some(Boolean)) return;
+    if (errors.receiverName || errors.receiverPhone || errors.parcelDescription) return;
 
     try {
       setBooking(true);
@@ -708,7 +735,7 @@ export default function BookingScreen({
         dropLongitude: drop.longitude,
 
         category,
-        // the id is the backend vehicleType (lite, mini, e_rickshaw, tata_ace ...)
+        // the id is the backend vehicleType (bike, scooty, e_rickshaw, tata_ace ...)
         vehicleType: selected.id,
 
         // the user's offered fare (or the estimate, if unchanged)
@@ -776,6 +803,19 @@ export default function BookingScreen({
   const showGroups = groups.length > 1;
   const showVariants = !!group && group.variants.length > 1;
 
+  const titleText = isOrder ? 'Order Delivery' : TITLES[activeMode];
+  const pickupLabel = isOrder ? 'Order from (nearby)' : 'Pickup';
+  const detailsTitle = isOrder
+    ? 'Order details'
+    : activeMode === 'goods'
+    ? 'Goods details'
+    : 'Parcel details';
+  const describeLabel = isOrder
+    ? 'What do you want to order?'
+    : activeMode === 'goods'
+    ? 'Describe your goods'
+    : 'Describe your parcel';
+
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       {/* Map + sheet ka area (footer ke upar) */}
@@ -839,11 +879,11 @@ export default function BookingScreen({
 
         {/* Back button + title (map ke upar) */}
         <View style={styles.topBar} pointerEvents="box-none">
-          <TouchableOpacity onPress={onBack} style={styles.backBtn} activeOpacity={0.8}>
+          <TouchableOpacity onPress={handleBack} style={styles.backBtn} activeOpacity={0.8}>
             <Ionicons name="arrow-back" size={22} color={BLACK} />
           </TouchableOpacity>
           <View style={styles.titlePill}>
-            <Text style={styles.titleText}>{TITLES[activeMode]}</Text>
+            <Text style={styles.titleText}>{titleText}</Text>
           </View>
         </View>
 
@@ -883,6 +923,7 @@ export default function BookingScreen({
           <View style={styles.handle} />
 
           <ScrollView
+            ref={scrollRef}
             contentContainerStyle={styles.scroll}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
@@ -892,222 +933,244 @@ export default function BookingScreen({
               scrollY.current = e.nativeEvent.contentOffset.y;
             }}
           >
-            {/* Parcel / Goods tabs (sirf tab dikhte hain jab dono allowed hon) */}
-            {modes.length > 1 && (
-              <View style={styles.modeRow}>
-                {modes.map((m) => {
-                  const active = m === mode;
-                  return (
-                    <TouchableOpacity
-                      key={m}
-                      activeOpacity={0.85}
-                      onPress={() => onModePress(m)}
-                      style={[styles.modeTab, active && styles.modeTabActive]}
-                    >
-                      <Text style={styles.modeEmoji}>{MODE_EMOJI[m]}</Text>
-                      <Text style={[styles.modeText, active && styles.modeTextActive]}>
-                        {MODE_LABEL[m]}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            )}
-
-            {/* Locations (timeline) */}
-            <View style={styles.locCard}>
-              <View style={styles.timeline}>
-                <View style={styles.pickupDot} />
-                <View style={styles.timelineLine} />
-                <View style={styles.dropSquare} />
-              </View>
-
-              <View style={styles.flex}>
-                <TouchableOpacity
-                  style={styles.locRow}
-                  activeOpacity={0.7}
-                  onPress={() => setPicking('pickup')}
-                >
-                  <View style={styles.flex}>
-                    <Text style={styles.locLabel}>PICKUP PARCEL FROM</Text>
-                    <Text style={styles.locValue} numberOfLines={1}>
-                      {pickup.address}
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={20} color={GREY} />
-                </TouchableOpacity>
-
-                <View style={styles.divider} />
-
-                <TouchableOpacity
-                  style={styles.locRow}
-                  activeOpacity={0.7}
-                  onPress={() => setPicking('drop')}
-                >
-                  <View style={styles.flex}>
-                    <Text style={styles.locLabel}>DELIVER TO</Text>
-                    <Text
-                      style={[styles.locValue, !drop && styles.locPlaceholder]}
-                      numberOfLines={1}
-                    >
-                      {drop ? drop.address : 'Choose drop location'}
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={20} color={GREY} />
-                </TouchableOpacity>
-              </View>
+            {/* Step indicator */}
+            <View style={styles.stepRow}>
+              <View style={[styles.stepBar, styles.stepBarOn]} />
+              <View style={[styles.stepBar, step === 2 && styles.stepBarOn]} />
             </View>
+            <Text style={styles.stepLabel}>
+              {step === 1 ? 'Step 1 of 2  ·  Route & vehicle' : 'Step 2 of 2  ·  Receiver details'}
+            </Text>
 
-            {/* Group selector (Walk/Cycle/Bike/Auto/Cab, Auto/Truck) */}
-            {showGroups &&
-              (groups.length <= 2 ? (
-                <View style={styles.gRow}>{groups.map((g) => renderGroupCard(g, false))}</View>
-              ) : (
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.gScrollWrap}
-                  contentContainerStyle={styles.vRow}
-                >
-                  {groups.map((g) => renderGroupCard(g, true))}
-                </ScrollView>
-              ))}
-
-            {/* Vehicle categories (only when the group has more than one option) */}
-            {showVariants && group && (
+            {step === 1 && (
               <>
-                <Text style={styles.sectionTitle}>Choose a vehicle</Text>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.vRow}
-                >
-                  {group.variants.map((v) => {
-                    const active = v.id === selected?.id;
-                    return (
-                      <TouchableOpacity
-                        key={v.id}
-                        activeOpacity={0.85}
-                        onPress={() => setSelectedId(v.id)}
-                        style={[styles.vCard, active && styles.vCardActive]}
-                      >
-                        {active && (
-                          <View style={styles.checkBadge}>
-                            <Ionicons name="checkmark-circle" size={18} color={BLUE} />
-                          </View>
-                        )}
-                        <VehicleIcon iconKey={v.icon ?? v.id} emoji={v.emoji} />
-                        <Text style={styles.vName}>{v.name}</Text>
-                        <Text style={styles.vSub}>{v.sub}</Text>
-                        <Text style={[styles.vPrice, !drop && styles.vPriceHint]}>
-                          {priceText(v.id)}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
-              </>
-            )}
-
-            {/* Set your own fare */}
-            {drop && estimatedFare != null && finalFare != null && (
-              <View style={styles.fareCard}>
-                <View style={styles.fareHead}>
-                  <View style={styles.fareHeadIcon}>
-                    <Ionicons name="cash-outline" size={20} color={BLUE} />
+                {/* Parcel / Goods tabs (sirf tab dikhte hain jab dono allowed hon) */}
+                {modes.length > 1 && (
+                  <View style={styles.modeRow}>
+                    {modes.map((m) => {
+                      const active = m === mode;
+                      return (
+                        <TouchableOpacity
+                          key={m}
+                          activeOpacity={0.85}
+                          onPress={() => onModePress(m)}
+                          style={[styles.modeTab, active && styles.modeTabActive]}
+                        >
+                          <Text style={styles.modeEmoji}>{MODE_EMOJI[m]}</Text>
+                          <Text style={[styles.modeText, active && styles.modeTextActive]}>
+                            {MODE_LABEL[m]}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
+                )}
+
+                {/* Pickup / Drop (clean card) */}
+                <View style={styles.locCard}>
+                  <View style={styles.timeline}>
+                    <View style={styles.pickupDot} />
+                    <View style={styles.timelineLine} />
+                    <View style={styles.dropSquare} />
+                  </View>
+
                   <View style={styles.flex}>
-                    <Text style={styles.fareTitle}>Your offer</Text>
-                    <Text style={styles.fareHint}>
-                      Offer more to get a captain faster
-                    </Text>
-                  </View>
-                  {offerFare != null && (
-                    <TouchableOpacity onPress={() => setOfferFare(null)} activeOpacity={0.7}>
-                      <Text style={styles.fareReset}>Reset</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-
-                <View style={styles.fareRow}>
-                  <TouchableOpacity
-                    style={[styles.fareBtn, finalFare <= (minOffer ?? 0) && styles.fareBtnOff]}
-                    activeOpacity={0.8}
-                    onPress={() => changeFare(-FARE_STEP)}
-                    disabled={finalFare <= (minOffer ?? 0)}
-                  >
-                    <Ionicons name="remove" size={24} color={BLUE} />
-                  </TouchableOpacity>
-
-                  <Text style={styles.fareValue}>₹{finalFare}</Text>
-
-                  <TouchableOpacity
-                    style={[styles.fareBtn, finalFare >= (maxOffer ?? 0) && styles.fareBtnOff]}
-                    activeOpacity={0.8}
-                    onPress={() => changeFare(FARE_STEP)}
-                    disabled={finalFare >= (maxOffer ?? 0)}
-                  >
-                    <Ionicons name="add" size={24} color={BLUE} />
-                  </TouchableOpacity>
-                </View>
-
-                <View style={styles.fareMetaRow}>
-                  <View style={styles.fareMetaChip}>
-                    <Text style={styles.fareMetaText}>Estimated ₹{estimatedFare}</Text>
-                  </View>
-                  <View style={styles.fareMetaChip}>
-                    <Text style={styles.fareMetaText}>
-                      Range ₹{minOffer} - ₹{maxOffer}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            )}
-
-            {/* What are you sending? (parcel / goods) */}
-            {items.length > 0 && (
-              <>
-                <Text style={[styles.sectionTitle, styles.itemsTitle]}>What are you sending?</Text>
-                <Text style={styles.itemsHint}>
-                  Pick an item and we will suggest a vehicle
-                </Text>
-                <View style={styles.chipWrap}>
-                  {items.map((it) => {
-                    const active = it.id === itemId;
-                    return (
-                      <TouchableOpacity
-                        key={it.id}
-                        activeOpacity={0.85}
-                        onPress={() => onItemPress(it)}
-                        style={[styles.chip, active && styles.chipActive]}
-                      >
-                        <Text style={styles.chipEmoji}>{it.emoji}</Text>
-                        <Text style={[styles.chipText, active && styles.chipTextActive]}>
-                          {it.label}
+                    <TouchableOpacity
+                      style={styles.locRow}
+                      activeOpacity={0.7}
+                      onPress={() => setPicking('pickup')}
+                    >
+                      <View style={styles.flex}>
+                        <Text style={styles.locLabel}>{pickupLabel}</Text>
+                        <Text style={styles.locValue} numberOfLines={1}>
+                          {pickup.address}
                         </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </>
-            )}
+                      </View>
+                      <Text style={styles.locEdit}>Change</Text>
+                    </TouchableOpacity>
 
-            {/* Parcel description + receiver */}
-            {needsReceiver && (
-              <>
+                    <View style={styles.divider} />
+
+                    <TouchableOpacity
+                      style={styles.locRow}
+                      activeOpacity={0.7}
+                      onPress={() => setPicking('drop')}
+                    >
+                      <View style={styles.flex}>
+                        <Text style={styles.locLabel}>Drop</Text>
+                        <Text
+                          style={[styles.locValue, !drop && styles.locPlaceholder]}
+                          numberOfLines={1}
+                        >
+                          {drop ? drop.address : 'Where do you want to deliver?'}
+                        </Text>
+                      </View>
+                      <Text style={styles.locEdit}>{drop ? 'Change' : 'Add'}</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* Group selector (Walk / Bike / Auto / Goods) */}
+                {showGroups &&
+                  (groups.length <= 2 ? (
+                    <View style={styles.gRow}>{groups.map((g) => renderGroupCard(g, false))}</View>
+                  ) : (
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      style={styles.gScrollWrap}
+                      contentContainerStyle={styles.vRow}
+                    >
+                      {groups.map((g) => renderGroupCard(g, true))}
+                    </ScrollView>
+                  ))}
+
+                {/* Vehicle categories (only when the group has more than one option) */}
+                {showVariants && group && (
+                  <>
+                    <Text style={styles.sectionTitle}>Choose a vehicle</Text>
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={false}
+                      contentContainerStyle={styles.vRow}
+                    >
+                      {group.variants.map((v) => {
+                        const active = v.id === selected?.id;
+                        return (
+                          <TouchableOpacity
+                            key={v.id}
+                            activeOpacity={0.85}
+                            onPress={() => setSelectedId(v.id)}
+                            style={[styles.vCard, active && styles.vCardActive]}
+                          >
+                            {active && (
+                              <View style={styles.checkBadge}>
+                                <Ionicons name="checkmark-circle" size={18} color={BLUE} />
+                              </View>
+                            )}
+                            <VehicleIcon iconKey={v.icon ?? v.id} emoji={v.emoji} />
+                            <Text style={styles.vName}>{v.name}</Text>
+                            <Text style={styles.vSub}>{v.sub}</Text>
+                            <Text style={[styles.vPrice, !drop && styles.vPriceHint]}>
+                              {priceText(v.id)}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
+                  </>
+                )}
+
+                {/* Set your own fare */}
+                {drop && estimatedFare != null && finalFare != null && (
+                  <View style={styles.fareCard}>
+                    <View style={styles.fareHead}>
+                      <View style={styles.fareHeadIcon}>
+                        <Ionicons name="cash-outline" size={20} color={BLUE} />
+                      </View>
+                      <View style={styles.flex}>
+                        <Text style={styles.fareTitle}>Your offer</Text>
+                        <Text style={styles.fareHint}>Tap the amount to set your own price</Text>
+                      </View>
+                      {offerFare != null && (
+                        <TouchableOpacity onPress={() => setOfferFare(null)} activeOpacity={0.7}>
+                          <Text style={styles.fareReset}>Reset</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+
+                    <View style={styles.fareRow}>
+                      <TouchableOpacity
+                        style={[styles.fareBtn, finalFare <= (minOffer ?? 0) && styles.fareBtnOff]}
+                        activeOpacity={0.8}
+                        onPress={() => changeFare(-FARE_STEP)}
+                        disabled={finalFare <= (minOffer ?? 0)}
+                      >
+                        <Ionicons name="remove" size={24} color={BLUE} />
+                      </TouchableOpacity>
+
+                      <View style={styles.fareValueWrap}>
+                        <Text style={styles.fareRupee}>₹</Text>
+                        <TextInput
+                          style={styles.fareInput}
+                          value={fareEditing ? fareText : String(finalFare)}
+                          onFocus={() => {
+                            setFareText(String(finalFare));
+                            setFareEditing(true);
+                          }}
+                          onChangeText={(t) => setFareText(t.replace(/\D/g, '').slice(0, 5))}
+                          onBlur={commitFare}
+                          onSubmitEditing={commitFare}
+                          keyboardType="number-pad"
+                          maxLength={5}
+                          selectTextOnFocus
+                        />
+                      </View>
+
+                      <TouchableOpacity
+                        style={[styles.fareBtn, finalFare >= (maxOffer ?? 0) && styles.fareBtnOff]}
+                        activeOpacity={0.8}
+                        onPress={() => changeFare(FARE_STEP)}
+                        disabled={finalFare >= (maxOffer ?? 0)}
+                      >
+                        <Ionicons name="add" size={24} color={BLUE} />
+                      </TouchableOpacity>
+                    </View>
+
+                    <View style={styles.fareMetaRow}>
+                      <View style={styles.fareMetaChip}>
+                        <Text style={styles.fareMetaText}>Estimated ₹{estimatedFare}</Text>
+                      </View>
+                      <View style={styles.fareMetaChip}>
+                        <Text style={styles.fareMetaText}>
+                          Range ₹{minOffer} - ₹{maxOffer}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+                )}
+
+                {/* What are you sending / ordering? */}
+                {items.length > 0 && (
+                  <>
+                    <Text style={[styles.sectionTitle, styles.itemsTitle]}>
+                      {isOrder ? 'What are you ordering?' : 'What are you sending?'}
+                    </Text>
+                    <Text style={styles.itemsHint}>
+                      {isOrder
+                        ? 'Near your location: food, veg, docs & more'
+                        : 'Pick an item or type your own below'}
+                    </Text>
+                    <View style={styles.chipWrap}>
+                      {items.map((it) => {
+                        const active = it.id === itemId;
+                        return (
+                          <TouchableOpacity
+                            key={it.id}
+                            activeOpacity={0.85}
+                            onPress={() => onItemPress(it)}
+                            style={[styles.chip, active && styles.chipActive]}
+                          >
+                            <Text style={styles.chipEmoji}>{it.emoji}</Text>
+                            <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                              {it.label}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </>
+                )}
+
                 {/* Parcel description */}
-                <Text style={[styles.sectionTitle, styles.itemsTitle]}>
-                  {activeMode === 'goods' ? 'Goods details' : 'Parcel details'}
-                </Text>
+                <Text style={[styles.sectionTitle, styles.itemsTitle]}>{detailsTitle}</Text>
                 <View style={styles.receiverCard}>
-                  <Text style={styles.inputLabel}>
-                    {activeMode === 'goods' ? 'Describe your goods' : 'Describe your parcel'}
-                  </Text>
+                  <Text style={styles.inputLabel}>{describeLabel}</Text>
                   <View
                     style={[
                       styles.inputWrap,
                       styles.inputWrapMulti,
-                      submitted && !!errors.parcelDescription && styles.inputError,
+                      descTried && !!errors.parcelDescription && styles.inputError,
                     ]}
                   >
                     <Ionicons
@@ -1118,16 +1181,71 @@ export default function BookingScreen({
                     />
                     <TextInput
                       style={[styles.input, styles.inputMulti]}
-                      placeholder="e.g. Document envelope, 2 kg box"
+                      placeholder={
+                        isOrder
+                          ? 'e.g. Veg thali, 1 kg tomatoes'
+                          : 'e.g. Document envelope, 2 kg box'
+                      }
                       placeholderTextColor="#94A3B8"
                       value={parcelDescription}
                       onChangeText={setParcelDescription}
                       multiline
                     />
                   </View>
-                  {submitted && !!errors.parcelDescription && (
+                  {descTried && !!errors.parcelDescription && (
                     <Text style={styles.error}>{errors.parcelDescription}</Text>
                   )}
+                </View>
+              </>
+            )}
+
+            {step === 2 && (
+              <>
+                {/* Trip summary */}
+                <View style={styles.sumCard}>
+                  <View style={styles.sumRoute}>
+                    <View style={styles.timeline}>
+                      <View style={styles.pickupDot} />
+                      <View style={styles.timelineLine} />
+                      <View style={styles.dropSquare} />
+                    </View>
+                    <View style={styles.flex}>
+                      <View style={styles.sumRow}>
+                        <Text style={styles.sumAddr} numberOfLines={1}>
+                          {pickup.address}
+                        </Text>
+                      </View>
+                      <View style={styles.sumRow}>
+                        <Text style={styles.sumAddr} numberOfLines={1}>
+                          {drop?.address}
+                        </Text>
+                      </View>
+                    </View>
+                    <TouchableOpacity
+                      onPress={handleBack}
+                      activeOpacity={0.7}
+                      style={{ justifyContent: 'center' }}
+                    >
+                      <Text style={styles.locEdit}>Edit</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={styles.sumDivider} />
+
+                  <View style={styles.sumFoot}>
+                    <View style={styles.flex}>
+                      <Text style={styles.sumVeh}>
+                        {selected?.emoji} {selected?.name}
+                        {route ? `  ·  ${route.distanceKm} km  ·  ${route.durationMinutes} min` : ''}
+                      </Text>
+                      {!!parcelDescription.trim() && (
+                        <Text style={styles.sumDesc} numberOfLines={1}>
+                          📦 {parcelDescription.trim()}
+                        </Text>
+                      )}
+                    </View>
+                    {finalFare != null && <Text style={styles.sumFare}>₹{finalFare}</Text>}
+                  </View>
                 </View>
 
                 {/* Receiver */}
@@ -1207,7 +1325,7 @@ export default function BookingScreen({
                   </TouchableOpacity>
                 </View>
 
-                {/* Terms & Conditions (receiver section ke neeche) */}
+                {/* Terms & Conditions */}
                 <TouchableOpacity
                   style={styles.termsRow}
                   activeOpacity={0.7}
@@ -1226,42 +1344,44 @@ export default function BookingScreen({
 
       {/* Book bar */}
       <View style={styles.footer}>
-        <View style={styles.payRow}>
-          <Ionicons name="wallet-outline" size={14} color={GREY} />
-          <Text style={styles.payText}>Pay at</Text>
-          {(['pickup', 'drop'] as const).map((k) => {
-            const active = payAt === k;
-            return (
-              <TouchableOpacity
-                key={k}
-                activeOpacity={0.85}
-                onPress={() => setPayAt(k)}
-                style={[styles.payChip, active && styles.payChipActive]}
-              >
-                <Ionicons
-                  name={active ? 'radio-button-on' : 'radio-button-off'}
-                  size={12}
-                  color={active ? BLUE : GREY}
-                />
-                <Text style={[styles.payChipText, active && styles.payChipTextActive]}>
-                  {k === 'pickup' ? 'Pickup' : 'Drop'}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+        {step === 2 && (
+          <View style={styles.payRow}>
+            <Ionicons name="wallet-outline" size={14} color={GREY} />
+            <Text style={styles.payText}>Pay at</Text>
+            {(['pickup', 'drop'] as const).map((k) => {
+              const active = payAt === k;
+              return (
+                <TouchableOpacity
+                  key={k}
+                  activeOpacity={0.85}
+                  onPress={() => setPayAt(k)}
+                  style={[styles.payChip, active && styles.payChipActive]}
+                >
+                  <Ionicons
+                    name={active ? 'radio-button-on' : 'radio-button-off'}
+                    size={12}
+                    color={active ? BLUE : GREY}
+                  />
+                  <Text style={[styles.payChipText, active && styles.payChipTextActive]}>
+                    {k === 'pickup' ? 'Pickup' : 'Drop'}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
 
         <TouchableOpacity
           style={[styles.bookBtn, (booking || routeLoading) && styles.bookBtnDisabled]}
           activeOpacity={0.9}
-          onPress={onBook}
+          onPress={step === 1 ? onContinue : onBook}
           disabled={booking || routeLoading}
         >
           {booking ? (
             <ActivityIndicator color="#fff" />
           ) : (
             <>
-              <Text style={styles.bookText}>Order Now</Text>
+              <Text style={styles.bookText}>{step === 1 ? 'Continue' : 'Order Now'}</Text>
               {finalFare != null && (
                 <View style={styles.bookFare}>
                   <Text style={styles.bookFareText}>₹{finalFare}</Text>
@@ -1446,11 +1566,39 @@ const styles = StyleSheet.create({
   },
   timelineLine: { flex: 1, width: 2, backgroundColor: BORDER, marginVertical: 4 },
   dropSquare: { width: 12, height: 12, borderRadius: 3, backgroundColor: RED },
-  locRow: { height: 52, flexDirection: 'row', alignItems: 'center' },
-  locLabel: { fontSize: 10, fontWeight: '700', color: GREY, letterSpacing: 0.8 },
+  locRow: { height: 58, flexDirection: 'row', alignItems: 'center' },
+  locLabel: { fontSize: 11, fontWeight: '600', color: GREY },
+  locEdit: { fontSize: 12, fontWeight: '700', color: BLUE, marginLeft: 8 },
   locValue: { fontSize: 14, fontWeight: '600', color: BLACK, marginTop: 2 },
   locPlaceholder: { color: '#94A3B8', fontWeight: '500' },
   divider: { height: 1, backgroundColor: BORDER },
+
+  // step indicator
+  stepRow: { flexDirection: 'row', marginBottom: 6 },
+  stepBar: { flex: 1, height: 4, borderRadius: 2, backgroundColor: BORDER, marginHorizontal: 2 },
+  stepBarOn: { backgroundColor: BLUE },
+  stepLabel: { fontSize: 12, fontWeight: '700', color: GREY, marginBottom: 12, marginLeft: 2 },
+
+  // trip summary (step 2)
+  sumCard: {
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    elevation: 2,
+    shadowColor: BLACK,
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  sumRoute: { flexDirection: 'row', alignItems: 'stretch' },
+  sumRow: { height: 34, justifyContent: 'center' },
+  sumAddr: { fontSize: 13, fontWeight: '600', color: BLACK },
+  sumDivider: { height: 1, backgroundColor: BORDER },
+  sumFoot: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10 },
+  sumVeh: { fontSize: 13, fontWeight: '700', color: BLACK },
+  sumDesc: { fontSize: 12, color: GREY, marginTop: 3 },
+  sumFare: { fontSize: 20, fontWeight: '800', color: BLACK, marginLeft: 10 },
 
   // vehicles
   sectionTitle: { fontSize: 16, fontWeight: '800', color: BLACK, marginBottom: 8 },
@@ -1550,6 +1698,21 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: '800',
     color: BLACK,
+  },
+  fareValueWrap: {
+    minWidth: 110,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fareRupee: { fontSize: 28, fontWeight: '800', color: BLACK },
+  fareInput: {
+    fontSize: 28,
+    fontWeight: '800',
+    color: BLACK,
+    minWidth: 70,
+    textAlign: 'center',
+    paddingVertical: 0,
   },
   fareMetaRow: {
     flexDirection: 'row',

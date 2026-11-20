@@ -108,7 +108,8 @@ export default function RideSummaryScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const captainRideId: string = route.params?.captainRideId;
-
+const completeFirst: boolean = !!route.params?.completeFirst;
+const startOtp: string | undefined = route.params?.otp;
   const [data, setData] = useState<CaptainRideDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [captainName, setCaptainName] = useState('');
@@ -117,7 +118,8 @@ export default function RideSummaryScreen() {
   const [qrMode, setQrMode] = useState(false);
   const [qrUri, setQrUri] = useState<string | null>(null);
   const [paying, setPaying] = useState(false);
-
+const [pickupMethod, setPickupMethod] = useState<PayMethod | null>(null);
+const [checkedPickup, setCheckedPickup] = useState(false);
   // rating
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState('');
@@ -212,20 +214,43 @@ export default function RideSummaryScreen() {
       Alert.alert('Gallery', e?.message || 'QR nahi chun paaye');
     }
   };
+const savePayment = async (method: PayMethod) => {
+  try {
+    setPaying(true);
 
-  /* ---------- payment save ---------- */
-  const savePayment = async (method: PayMethod) => {
-    try {
-      setPaying(true);
-      await api.patch(`/captain-rides/${captainRideId}/payment`, { method });
-      await fetchRide();
-    } catch (e: any) {
-      Alert.alert('Payment save nahi hui', getErrorMessage(e, 'Dobara try karo'));
-    } finally {
-      setPaying(false);
+    // Drop par payment wali ride: pehle yahin ride finish karo, phir payment save
+    if (completeFirst && data?.status !== 'COMPLETED') {
+      await api.patch(`/captain-rides/${captainRideId}/status`, {
+        status: 'COMPLETED',
+        ...(startOtp ? { otp: startOtp } : {}),
+      });
     }
-  };
 
+    await api.patch(`/captain-rides/${captainRideId}/payment`, { method });
+    await fetchRide();
+  } catch (e: any) {
+    Alert.alert('Payment save nahi hui', getErrorMessage(e, 'Dobara try karo'));
+  } finally {
+    setPaying(false);
+  }
+};
+// Pickup par payment ho chuki thi? To yahan auto-save karo, payment screen mat dikhao
+useEffect(() => {
+  AsyncStorage.getItem(`pickup_paid_${captainRideId}`)
+    .then((v) => {
+      if (v === 'CASH' || v === 'UPI') setPickupMethod(v);
+    })
+    .catch(() => {})
+    .finally(() => setCheckedPickup(true));
+}, [captainRideId]);
+
+useEffect(() => {
+  if (!data || paid || !pickupMethod || paying) return;
+  savePayment(pickupMethod).then(() =>
+    AsyncStorage.removeItem(`pickup_paid_${captainRideId}`).catch(() => {}),
+  );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [data, paid, pickupMethod]);
   const onCashPress = () => {
     if (paying) return;
     Alert.alert('Cash payment', `Kya aapko ₹${fare} cash mil gaye?`, [
@@ -273,7 +298,7 @@ export default function RideSummaryScreen() {
   };
 
   /* ---------- UI ---------- */
-  if (loading) {
+  if (loading || !checkedPickup || (!paid && pickupMethod)) {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
         <StatusBar barStyle="dark-content" />
@@ -319,8 +344,8 @@ export default function RideSummaryScreen() {
         {/* ================= PAYMENT (pehle) ================= */}
         {!paid ? (
           <>
-            <Text style={styles.done}>Ride complete 🎉</Text>
-            <Text style={styles.doneSub}>Ab customer se payment lo</Text>
+ <Text style={styles.done}>{completeFirst ? 'Collect fare' : 'Ride complete 🎉'}</Text>
+<Text style={styles.doneSub}>Ab customer se payment lo</Text>
 
             <View style={styles.amountCard}>
               <Text style={styles.amountLabel}>Total fare</Text>

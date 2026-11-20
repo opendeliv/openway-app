@@ -10,14 +10,22 @@ export type RootStackParamList = {
   PrivacyPolicy: undefined;
   EditCaptain: undefined;
   CaptainTabs: undefined;
-
-  CaptainDetail: { captain: Captain }; // yahan badla
-  AdminTabs: undefined; // naya
+  CaptainDetail: { captain: Captain };
+  AdminTabs: undefined;
   CaptainRide: { captainRideId: string };
   RideTracking: { rideId: string };
 
-  // naya: tab bar ke bina full screen booking
-  Booking: { service: string; pickup: Place; drop: Place | null };
+  // Send now / Order now: pehle address screen
+  ParcelAddress: { service: string; pickup: Place; drop?: Place | null };
+
+  // Tab bar ke bina full screen booking
+  Booking: {
+    service: string;
+    pickup: Place;
+    drop?: Place | null;
+    receiverName?: string;
+    receiverPhone?: string;
+  };
 };
 
 export type MainTabParamList = {

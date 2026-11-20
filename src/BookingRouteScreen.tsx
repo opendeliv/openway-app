@@ -10,7 +10,7 @@ type Props = NativeStackScreenProps<RootStackParamList, 'Booking'>;
 
 // Root stack par chalta hai (MainTabs ke bahar), isliye bottom tab bar yaha dikhta hi nahi
 export default function BookingRouteScreen({ route, navigation }: Props) {
-  const { service, pickup, drop } = route.params;
+  const { service, pickup, drop, receiverName, receiverPhone } = route.params;
 
   return (
     <BookingScreen
@@ -18,6 +18,8 @@ export default function BookingRouteScreen({ route, navigation }: Props) {
       allowedCategories={ALLOWED_CATEGORIES}
       initialPickup={pickup}
       initialDrop={drop}
+      initialReceiverName={receiverName}
+      initialReceiverPhone={receiverPhone}
       onBack={() => navigation.goBack()}
       onOpenTerms={() => navigation.navigate('PrivacyPolicy')}
       // replace: tracking se back karne par Home aaye, Booking nahi

@@ -4,6 +4,7 @@ import {
   Alert,
   Text,
   TouchableOpacity,
+    Image,
   StyleSheet,
   View,
   ScrollView,
@@ -48,11 +49,41 @@ const MAP_H = SNAP_HALF + 40; // map ki fixed height (sheet ke peeche tak)
 const MAP_ZOOM = 0.006; // chhota number = zyada zoom
 const PIN_H = 32; // center pin ki height (stem + dot)
 
+// ---------- Promo carousel ----------
+const PROMO_W = Dimensions.get('window').width - 32; // scroll ke paddingHorizontal 16+16
+const PROMO_INTERVAL = 3500;
+
+const PROMOS = [
+  {
+    id: 'send',
+    title: 'Send parcels in minutes',
+    sub: 'Door-to-door delivery, person to person',
+    btn: 'Send now',
+    emoji: '📦',
+    bg: BLUE,
+    circle: BLUE_DARK,
+    btnColor: BLUE,
+    service: 'parcel',
+  },
+  {
+    id: 'order',
+    title: 'Order parcels in minutes',
+    sub: 'Your Needs, Delivered to Your Doorstep.',
+    btn: 'Order now',
+    emoji: '🛍️',
+    bg: '#F97316',
+    circle: '#C2410C',
+    btnColor: '#C2410C',
+     service: 'order',  
+  },
+];
+
 type Service = {
   id: string;
   title: string;
   emoji: string;
   tint: string;
+   image?: any;
 };
 
 // Location na mile (permission deny / GPS off) to ye pickup use hoga
@@ -132,7 +163,13 @@ const splitAddress = (address: string) => {
 const SERVICES: Service[] = [
   { id: 'bike', title: 'Bike', emoji: '🏍️', tint: '#DDF5E6' },
   { id: 'auto', title: 'Auto', emoji: '🛺', tint: '#FFF3C4' },
-  { id: 'cab', title: 'Cab', emoji: '🚕', tint: '#DBEAFE' },
+ {
+    id: 'walk',
+    title: 'Walk',
+    emoji: '🚲',
+    tint: '#DBEAFE',
+    image: require('../../../constants/cycle.png'),
+  },
   { id: 'goods', title: 'Goods', emoji: '🚚', tint: '#EADFFB' },
 ];
 
@@ -186,8 +223,12 @@ const rideLook = (r: UserRide) => {
 
   if (cat === 'PARCEL') return { emoji: '📦', title: 'Parcel Delivery', tint: '#FFE4D6' };
   if (cat === 'GOODS') return { emoji: '🚚', title: 'Goods Delivery', tint: '#EADFFB' };
-  if (veh.includes('BIKE')) return { emoji: '🏍️', title: 'Bike Ride', tint: '#DDF5E6' };
-  if (veh.includes('AUTO')) return { emoji: '🛺', title: 'Auto Ride', tint: '#FFF3C4' };
+  if (veh === 'WALK' || veh === 'CYCLE')
+    return { emoji: '🚲', title: 'Walk Delivery', tint: '#DBEAFE' };
+  if (veh.includes('BIKE') || veh === 'SCOOTY')
+    return { emoji: '🏍️', title: 'Bike Ride', tint: '#DDF5E6' };
+  if (veh.includes('AUTO') || veh === 'E_RICKSHAW')
+    return { emoji: '🛺', title: 'Auto Ride', tint: '#FFF3C4' };
   return { emoji: '🚕', title: 'Cab Ride', tint: '#FFF3C4' };
 };
 
@@ -257,6 +298,26 @@ export default function HomeScreen() {
 
   // App launch par active ride mile to sirf ek baar auto-open karo
   const resumedRef = useRef(false);
+
+  // Promo carousel
+  const promoRef = useRef<ScrollView>(null);
+  const promoIdx = useRef(0);
+  const [promoDot, setPromoDot] = useState(0);
+
+  const goPromo = useCallback((i: number) => {
+    promoIdx.current = i;
+    setPromoDot(i);
+    promoRef.current?.scrollTo({ x: i * PROMO_W, animated: true });
+  }, []);
+
+  // har 3.5 sec me agla card (sirf jab carousel dikh raha ho)
+  useEffect(() => {
+    if (drop) return;
+    const t = setInterval(() => {
+      goPromo((promoIdx.current + 1) % PROMOS.length);
+    }, PROMO_INTERVAL);
+    return () => clearInterval(t);
+  }, [drop, goPromo]);
 
   // ---------- Map + bottom sheet state ----------
   const mapRef = useRef<MapView>(null);
@@ -528,15 +589,26 @@ export default function HomeScreen() {
     return true;
   };
 
-  const onServicePress = (id: string) => {
-    if (blockedByActiveRide()) return;
-    // Booking root stack screen hai, isliye neeche ka tab bar apne aap hide rehta hai
-    navigation.navigate('Booking', {
+const onServicePress = (id: string) => {
+  if (blockedByActiveRide()) return;
+
+  // Sirf Order now -> pehle ParcelAddress screen
+  if (id === 'order') {
+    navigation.navigate('ParcelAddress', {
       service: id,
       pickup: pickup ?? FALLBACK_PICKUP,
       drop,
     });
-  };
+    return;
+  }
+
+  // Send now / Bike / Auto / Cab / Goods -> seedha Booking
+  navigation.navigate('Booking', {
+    service: id,
+    pickup: pickup ?? FALLBACK_PICKUP,
+    drop,
+  });
+};
 
   const openPicker = (which: 'pickup' | 'drop') => {
     if (blockedByActiveRide()) return;
@@ -657,7 +729,7 @@ export default function HomeScreen() {
                 style={[styles.searchText, !!drop && styles.searchTextFilled]}
                 numberOfLines={1}
               >
-                {drop ? drop.address : 'Where do you want to go?'}
+                {drop ? drop.address : 'Ready to Send?'}
               </Text>
               {drop && (
                 <TouchableOpacity
@@ -722,34 +794,72 @@ export default function HomeScreen() {
                   onPress={() => onServicePress(s.id)}
                 >
                   <View style={[styles.serviceIcon, { backgroundColor: s.tint }]}>
-                    <Text style={styles.serviceEmoji}>{s.emoji}</Text>
-                  </View>
+  {s.image ? (
+    <Image source={s.image} style={styles.serviceImg} resizeMode="contain" />
+  ) : (
+    <Text style={styles.serviceEmoji}>{s.emoji}</Text>
+  )}
+</View>
                   <Text style={styles.serviceTitle}>{s.title}</Text>
                 </TouchableOpacity>
               ))}
             </View>
 
-            {/* Parcel promo (drop chunne se pehle) */}
+            {/* Promo carousel (drop chunne se pehle) */}
             {!drop && (
-              <View style={styles.promo}>
-                <View style={styles.promoCircleBig} />
-                <View style={styles.promoCircleSmall} />
+              <View style={styles.promoSection}>
+                <ScrollView
+                  ref={promoRef}
+                  horizontal
+                  pagingEnabled
+                  nestedScrollEnabled
+                  showsHorizontalScrollIndicator={false}
+                  decelerationRate="fast"
+                  snapToInterval={PROMO_W}
+                  scrollEventThrottle={16}
+                  onMomentumScrollEnd={(e) => {
+                    const i = Math.round(e.nativeEvent.contentOffset.x / PROMO_W);
+                    promoIdx.current = i; // manual swipe ke baad timer yahin se aage chale
+                    setPromoDot(i);
+                  }}
+                >
+                  {PROMOS.map((p) => (
+                    <View key={p.id} style={{ width: PROMO_W }}>
+                      <View style={[styles.promo, { backgroundColor: p.bg, marginBottom: 0 }]}>
+                        <View style={[styles.promoCircleBig, { backgroundColor: p.circle }]} />
+                        <View style={styles.promoCircleSmall} />
 
-                <View style={styles.promoTextWrap}>
-                  <Text style={styles.promoTitle}>Send parcels in minutes</Text>
-                  <Text style={styles.promoSub}>
-                    Door-to-door delivery, person to person
-                  </Text>
-                  <TouchableOpacity
-                    style={styles.promoBtn}
-                    activeOpacity={0.85}
-                    onPress={() => onServicePress('parcel')}
-                  >
-                    <Text style={styles.promoBtnText}>Send now</Text>
-                    <Ionicons name="arrow-forward" size={14} color={BLUE} />
-                  </TouchableOpacity>
+                        <View style={styles.promoTextWrap}>
+                          <Text style={styles.promoTitle}>{p.title}</Text>
+                          <Text style={styles.promoSub}>{p.sub}</Text>
+                          <TouchableOpacity
+                            style={styles.promoBtn}
+                            activeOpacity={0.85}
+                            onPress={() => onServicePress(p.service)}
+                          >
+                            <Text style={[styles.promoBtnText, { color: p.btnColor }]}>
+                              {p.btn}
+                            </Text>
+                            <Ionicons name="arrow-forward" size={14} color={p.btnColor} />
+                          </TouchableOpacity>
+                        </View>
+                        <Text style={styles.promoEmoji}>{p.emoji}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </ScrollView>
+
+                {/* dots */}
+                <View style={styles.dotsRow}>
+                  {PROMOS.map((p, i) => (
+                    <TouchableOpacity
+                      key={p.id}
+                      onPress={() => goPromo(i)}
+                      hitSlop={{ top: 8, bottom: 8, left: 6, right: 6 }}
+                      style={[styles.dot, i === promoDot && styles.dotActive]}
+                    />
+                  ))}
                 </View>
-                <Text style={styles.promoEmoji}>📦</Text>
               </View>
             )}
 
@@ -1097,6 +1207,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 16,
   },
+serviceImg: {
+  width: 75,
+  height: 75,
+   marginTop: 4,
+  transform: [{ scaleX: -1 }], // image ko left direction me ghumata hai
+},
+
   promoCircleBig: {
     position: 'absolute',
     right: -40,
@@ -1132,6 +1249,23 @@ const styles = StyleSheet.create({
   },
   promoBtnText: { color: BLUE, fontSize: 13, fontWeight: '800', marginRight: 6 },
   promoEmoji: { fontSize: 64 },
+
+  // promo carousel
+  promoSection: { marginBottom: 16 },
+  dotsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#CBD5E1',
+    marginHorizontal: 3,
+  },
+  dotActive: { width: 18, backgroundColor: BLUE },
 
   // why raptor
   whyCard: {

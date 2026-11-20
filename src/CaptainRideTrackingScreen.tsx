@@ -22,6 +22,7 @@ import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import Geolocation from '@react-native-community/geolocation';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 
+
 // Adjust these paths to your folder structure
 import api from './services/CaptainaRideApi';
 import { mapsApi, decodePolyline, RouteInfo } from './services/mapsApi';
@@ -37,7 +38,6 @@ import {
    ========================================================= */
 
 const BLUE = '#1F6FE5';
-const BLUE_DARK = '#1553B3';
 const BLUE_LIGHT = '#EAF2FF';
 const BG = '#F4F7FB';
 const BLACK = '#0F172A';
@@ -51,15 +51,17 @@ const AMBER = '#F59E0B';
 
 const POLL_MS = 4000; // ride refresh
 const LOCATION_PUSH_MS = 6000; // live location -> backend (customer sees captain move)
-const COMPLETE_RANGE_METERS = 400; // captain can complete the ride himself within this distance of drop
 const AVG_SPEED_KMH = 25; // only used for a rough ETA
 
-// Sheet snap points (share of the body height). Same behaviour as the customer screen.
+// Sheet snap points (share of the body height).
 // Default: map 36% / details 64%.  Pulled down: map 50% / details 50%.
 const MAP_RATIO_DEFAULT = 0.36;
 const MAP_RATIO_HALF = 0.5;
 
 const FALLBACK_CENTER = { latitude: 23.2599, longitude: 77.4126 }; // Bhopal
+
+// TEMP: testing ke liye. Release se pehle false kar dena!
+const TEST_SKIP_GEOFENCE = true;
 
 type Coords = { latitude: number; longitude: number };
 
@@ -150,7 +152,6 @@ const STATUS_COPY: Record<string, { title: string; hint: string }> = {
 };
 
 // Main bottom button text for each status
-// (STARTED has no bottom button: "Complete ride" shows in the status row near the drop)
 const ACTION_LABEL: Record<string, string> = {
   ASSIGNED: "Let's go for pickup",
   ACCEPTED: "Let's go for pickup",
@@ -257,10 +258,30 @@ const ContactLine = ({ label, name, phone }: { label: string; name: string; phon
   </View>
 );
 
-// Parcel / goods details: collapsed by default, opens like a dropdown inside the customer card
+// Small rounded chip (icon + text)
+const InfoChip = ({ icon, label }: { icon: string; label: string }) => (
+  <View style={styles.infoChip}>
+    <Ionicons name={icon} size={13} color={BLUE} />
+    <Text style={styles.infoChipText}>{label}</Text>
+  </View>
+);
+
+// Parcel / goods details: collapsed by default. Chips on top, description below.
 const ParcelDropdown = ({ ride }: { ride: Record<string, any> }) => {
   const [open, setOpen] = useState(false);
   const hasSender = !!ride.senderName || !!ride.senderPhone;
+
+  const chips: { icon: string; label: string }[] = [];
+  if (ride.category) {
+    chips.push({
+      icon: 'cube-outline',
+      label: (CATEGORY_LABEL as Record<string, string>)[ride.category] ?? prettyLabel(ride.category),
+    });
+  }
+  if (ride.parcelSize) chips.push({ icon: 'resize-outline', label: prettyLabel(ride.parcelSize) });
+  if (ride.parcelWeight) chips.push({ icon: 'barbell-outline', label: `${str(ride.parcelWeight)} kg` });
+  if (ride.isFragile) chips.push({ icon: 'warning-outline', label: 'Fragile' });
+  if (ride.vehicleType) chips.push({ icon: 'car-sport-outline', label: prettyLabel(ride.vehicleType) });
 
   return (
     <View style={styles.parcelWrap}>
@@ -274,25 +295,22 @@ const ParcelDropdown = ({ ride }: { ride: Record<string, any> }) => {
 
       {open && (
         <View style={styles.parcelBody}>
+          {chips.length > 0 && (
+            <View style={styles.chipRow}>
+              {chips.map((c, i) => (
+                <InfoChip key={i} icon={c.icon} label={c.label} />
+              ))}
+            </View>
+          )}
+
           {!!ride.parcelDescription && (
-            <View style={styles.contactLine}>
-              <View style={styles.flex}>
-                <Text style={styles.stopLabel}>PACKAGE</Text>
-                <Text style={styles.contactName}>{str(ride.parcelDescription)}</Text>
-              </View>
+            <View style={styles.descBox}>
+              <Text style={styles.stopLabel}>DESCRIPTION</Text>
+              <Text style={styles.descText}>{str(ride.parcelDescription)}</Text>
             </View>
           )}
-          {!!ride.parcelSize && (
-            <View style={styles.contactLine}>
-              <View style={styles.flex}>
-                <Text style={styles.stopLabel}>SIZE</Text>
-                <Text style={styles.contactName}>{prettyLabel(ride.parcelSize)}</Text>
-              </View>
-            </View>
-          )}
-          {hasSender && (
-            <ContactLine label="SENDER" name={str(ride.senderName)} phone={str(ride.senderPhone)} />
-          )}
+
+          {hasSender && <ContactLine label="SENDER" name={str(ride.senderName)} phone={str(ride.senderPhone)} />}
           <ContactLine label="RECEIVER" name={str(ride.receiverName)} phone={str(ride.receiverPhone)} />
         </View>
       )}
@@ -332,6 +350,47 @@ const StopRow = ({
   </View>
 );
 
+// Customer ne kab pay karna chuna hai: pickup par ya drop par
+const PayAtCard = ({
+  payAt,
+  paid,
+  changed,
+}: {
+  payAt: 'PICKUP' | 'DROP';
+  paid?: boolean;
+  changed?: boolean;
+}) => {
+  const atPickup = payAt === 'PICKUP';
+  return (
+    <View style={[styles.card, styles.payAtCard]}>
+      <Text style={styles.eyebrow}>PAYMENT</Text>
+      <View style={styles.personRow}>
+        <View style={[styles.avatar, styles.avatarFallback]}>
+          <Ionicons
+            name={paid ? 'checkmark-circle' : atPickup ? 'location' : 'flag'}
+            size={22}
+            color={paid ? GREEN : BLUE}
+          />
+        </View>
+        <View style={styles.flex}>
+          <Text style={[styles.personName, paid && { color: GREEN }]}>
+            {paid ? 'Paid at Pickup' : atPickup ? 'Pay at Pickup' : 'Pay at Drop'}
+          </Text>
+          <Text style={styles.personSub}>
+            {paid
+              ? 'Payment received from the customer at pickup'
+              : changed
+              ? 'Customer did not pay at pickup, will pay at the drop location'
+              : atPickup
+              ? 'Customer will pay at the pickup location'
+              : 'Customer will pay at the drop location'}
+          </Text>
+        </View>
+      </View>
+    </View>
+  );
+};
+
 /* =========================================================
    SCREEN
    ========================================================= */
@@ -355,6 +414,16 @@ export default function CaptainRideTrackingScreen() {
   const [otpVisible, setOtpVisible] = useState(false);
   const [otpValue, setOtpValue] = useState('');
   const [tripOpen, setTripOpen] = useState(false); // trip details dropdown
+
+  // parcel delivery (receiver OTP)
+  const [deliveryOtp, setDeliveryOtp] = useState('');
+  const [deliveryVerifiedLocal, setDeliveryVerifiedLocal] = useState(false);
+  const [verifiedOtp, setVerifiedOtp] = useState('');
+
+  // pickup steps (ARRIVED): product -> payment -> OTP
+  const [productTaken, setProductTaken] = useState(false);
+
+  const [switchedToDrop, setSwitchedToDrop] = useState(false); // customer ne pickup par pay nahi kiya
 
   const mapRef = useRef<MapView>(null);
   const leavingRef = useRef(false);
@@ -467,15 +536,34 @@ export default function CaptainRideTrackingScreen() {
   const status = data?.status;
   const ride = data?.ride ?? {};
 
-  // Leave the screen once the ride is finished / cancelled. The home screen
-  // shows the payment + rating popup after a completed ride.
-  // This also runs when the CUSTOMER ends the ride (captain polls and sees COMPLETED).
+  const parcelLike = ride.category === 'PARCEL' || ride.category === 'GOODS';
+  const originalPayAt: 'PICKUP' | 'DROP' =
+    str(ride.payAt).toUpperCase() === 'PICKUP' ? 'PICKUP' : 'DROP';
+  // Captain ne "Pay at drop" chuna to payment drop par hogi
+  const payAt: 'PICKUP' | 'DROP' = switchedToDrop ? 'DROP' : originalPayAt;
+
+  const paidAtPickup =
+  originalPayAt === 'PICKUP' && !switchedToDrop && !!ride.pickupPaymentDone;
+
+  // Pickup steps (ARRIVED status): product -> payment -> OTP
+  const needProductConfirm = status === 'ARRIVED' && parcelLike && !productTaken;
+  const needPickupPayment =
+    status === 'ARRIVED' &&
+    !needProductConfirm &&
+    payAt === 'PICKUP' &&
+    !paidAtPickup;
+  const readyForOtp = status === 'ARRIVED' && !needProductConfirm && !needPickupPayment;
+
+  // Leave the screen automatically once the ride is finished / cancelled.
+  // (COMPLETED -> back to the previous screen, no manual navigation needed.)
   useEffect(() => {
     if (!status || leavingRef.current) return;
 
     if (status === 'COMPLETED') {
       leavingRef.current = true;
       navigation.goBack();
+      // Agar seedha Home par bhejna hai to upar wali line ki jagah ye use karo:
+      // navigation.reset({ index: 0, routes: [{ name: 'Home' }] });
     } else if (status === 'CANCELLED') {
       leavingRef.current = true;
       Alert.alert('Ride cancelled', 'This ride is no longer active.', [
@@ -496,8 +584,9 @@ export default function CaptainRideTrackingScreen() {
           setMyLoc(c);
 
           // Push to the backend so the customer sees the captain moving
+          // (testing mode mein band, warna fake location overwrite ho jayegi)
           const now = Date.now();
-          if (now - lastPushRef.current >= LOCATION_PUSH_MS) {
+          if (!TEST_SKIP_GEOFENCE && now - lastPushRef.current >= LOCATION_PUSH_MS) {
             lastPushRef.current = now;
             api.patch('/captains/me/location', c).catch(() => {});
           }
@@ -537,12 +626,6 @@ export default function CaptainRideTrackingScreen() {
   const target = started ? drop : pickup; // where the captain is heading now
 
   const toTargetM = myLoc && target ? metersBetween(myLoc, target) : null;
-
-  // Captain can complete the ride himself once he is within 400 m of the drop
-  const nearDrop =
-    started && myLoc && drop ? metersBetween(myLoc, drop) <= COMPLETE_RANGE_METERS : false;
-
-  /* ---------- Route line (captain -> pickup, then pickup -> drop) ---------- */
 
   const routeKey = `${data?.id ?? ''}-${started ? 'trip' : 'pickup'}`;
   const hasMyLoc = !!myLoc;
@@ -607,7 +690,7 @@ export default function CaptainRideTrackingScreen() {
   /* ---------- Actions ---------- */
 
   const updateStatus = async (
-    next: CaptainRideStatus,
+    next: CaptainRideStatus | 'COMPLETED' | 'CANCELLED',
     cancellationReason?: string,
     otp?: string,
   ): Promise<boolean> => {
@@ -630,7 +713,7 @@ export default function CaptainRideTrackingScreen() {
 
   const nextAction = status ? (NEXT_ACTION as any)[status] : undefined;
 
-  const onNextActionPress = () => {
+  const onNextActionPress = async () => {
     if (!nextAction) return;
 
     // Starting the trip needs the customer's OTP
@@ -640,14 +723,52 @@ export default function CaptainRideTrackingScreen() {
       return;
     }
 
+    // TEMP: "arrived" se pehle captain ki location pickup par set karo
+    if (TEST_SKIP_GEOFENCE && nextAction.next === 'ARRIVED' && pickup) {
+      try {
+        await api.patch('/captains/me/location', pickup);
+      } catch {}
+    }
+
     updateStatus(nextAction.next);
   };
 
-  // Captain completes the ride himself (only shown within 400 m of the drop)
-  const onCompletePress = () => {
-    if (updating) return;
-    updateStatus('COMPLETED');
+  // TEMP: testing ke liye captain ki location drop par set karo
+  const teleportToDrop = async () => {
+    if (TEST_SKIP_GEOFENCE && drop) {
+      try {
+        await api.patch('/captains/me/location', drop);
+      } catch {}
+    }
   };
+
+  // Complete / Collect fare button (normal + parcel rides).
+  // Pickup par paid -> seedha ride complete.
+  // Otherwise -> alert: "Have you received the payment?" Yes -> ride COMPLETED.
+  // Koi next screen nahi: COMPLETED hote hi upar wala effect apne aap back le jayega.
+  const askPaymentAndFinish = async (otp?: string) => {
+    if (updating) return;
+
+    const fareText = Number(ride.fare ?? data?.earning ?? 0).toFixed(0);
+
+    const finishRide = async () => {
+      await teleportToDrop();
+      await updateStatus('COMPLETED', undefined, otp || verifiedOtp || undefined);
+    };
+
+    // Already paid at pickup -> no need to ask again
+    if (paidAtPickup) {
+      finishRide();
+      return;
+    }
+
+    Alert.alert('Payment received?', `Have you received ₹${fareText} from the customer?`, [
+      { text: 'No', style: 'cancel' },
+      { text: 'Yes', onPress: finishRide },
+    ]);
+  };
+
+  const onCompletePress = () => askPaymentAndFinish();
 
   const onConfirmOtp = async () => {
     if (otpValue.length !== 4) {
@@ -661,6 +782,32 @@ export default function CaptainRideTrackingScreen() {
     }
   };
 
+  // Parcel rides: verify the OTP the receiver gives at delivery
+  const onVerifyDeliveryOtp = async () => {
+    if (deliveryOtp.length !== 4) {
+      Alert.alert('OTP required', 'Enter the 4-digit OTP from the receiver');
+      return;
+    }
+    const otp = deliveryOtp;
+    try {
+      setUpdating(true);
+      await api.post(`/captain-rides/${captainRideId}/verify-delivery-otp`, { otp });
+      setVerifiedOtp(otp); // Finish ride ke time COMPLETED ke saath bhejne ke liye
+      setDeliveryVerifiedLocal(true);
+      setDeliveryOtp('');
+      await fetchRide();
+
+      // OTP verify hote hi seedha payment ka alert
+      askPaymentAndFinish(otp);
+    } catch (e: any) {
+      Alert.alert('Error', getErrorMessage(e, 'Wrong OTP'));
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const onFinishPress = onCompletePress;
+
   const onConfirmCancel = async () => {
     if (!cancelReason.trim()) {
       Alert.alert('Reason required', 'Please enter a cancellation reason');
@@ -670,6 +817,20 @@ export default function CaptainRideTrackingScreen() {
     await updateStatus('CANCELLED', cancelReason.trim());
     setCancelReason('');
   };
+
+  // Pickup par payment mil gayi
+const onPickupPaid = async () => {
+  if (updating) return;
+  try {
+    setUpdating(true);
+    await api.patch(`/captain-rides/${captainRideId}/pickup-payment`);
+    await fetchRide(); // UI turant update
+  } catch (e: any) {
+    Alert.alert('Error', getErrorMessage(e, 'Payment update failed'));
+  } finally {
+    setUpdating(false);
+  }
+};
 
   const onBack = () => navigation.goBack();
 
@@ -724,13 +885,24 @@ export default function CaptainRideTrackingScreen() {
     );
   }
 
-  const copy = STATUS_COPY[status ?? 'ACCEPTED'] ?? STATUS_COPY.ACCEPTED;
   const arrived = status === 'ARRIVED';
-    const dropHint =
-    started && !nearDrop
-      ? `Complete ride drop ke ${Math.round(COMPLETE_RANGE_METERS)} m ke andar chalega`
-      : copy.hint;
-  const parcelLike = ride.category === 'PARCEL' || ride.category === 'GOODS';
+
+  // Parcel flow during the trip: receiver OTP first, then payment + finish
+  const deliveryVerified = !!ride.deliveryOtpVerified || deliveryVerifiedLocal;
+  const parcelStage: 'none' | 'otp' | 'payment' =
+    started && parcelLike ? (deliveryVerified ? 'payment' : 'otp') : 'none';
+  const payMethod = str(ride.paymentMethod).toUpperCase() || 'CASH';
+
+  const baseCopy = STATUS_COPY[status ?? 'ACCEPTED'] ?? STATUS_COPY.ACCEPTED;
+  const copy = needProductConfirm
+    ? { title: 'Take the product', hint: 'Collect the parcel from the customer' }
+    : needPickupPayment
+    ? { title: 'Collect payment', hint: 'Customer pays at pickup' }
+    : parcelStage === 'otp'
+    ? { title: 'Deliver the parcel', hint: 'Ask the receiver for the 4-digit OTP' }
+    : parcelStage === 'payment'
+    ? { title: 'Delivered', hint: paidAtPickup ? 'Payment done, finish the ride' : 'Collect the fare to finish the ride' }
+    : baseCopy;
 
   const pillText = arrived
     ? 'At pickup'
@@ -742,7 +914,6 @@ export default function CaptainRideTrackingScreen() {
   const customerPhone = str(ride.user?.phone ?? ride.userPhone ?? ride.passengerPhone ?? ride.riderPhone);
   const customerPhoto = str(ride.user?.profilePhoto);
   const customerRating = num(ride.user?.rating);
-
   const fare = Number(ride.fare ?? data.earning ?? 0).toFixed(0);
   const tripSummary = [
     prettyLabel(ride.vehicleType),
@@ -824,22 +995,19 @@ export default function CaptainRideTrackingScreen() {
                 <Text style={[styles.pillText, arrived && styles.pillTextGreen]}>{pillText}</Text>
               </View>
 
-              {/* Shows only on the trip, within 400 m of the drop */}
-{started && (
-  <TouchableOpacity
-    style={[
-      styles.completeBtn,
-      !nearDrop && styles.completeBtnOff,
-      updating && styles.btnDisabled,
-    ]}
-    activeOpacity={0.85}
-    disabled={updating || !nearDrop}
-    onPress={onCompletePress}
-  >
+              {/* Normal rides only: Complete ride on the trip.
+                  Parcel rides use the receiver OTP + payment flow instead. */}
+              {started && !parcelLike && (
+                <TouchableOpacity
+                  style={[styles.completeBtn, updating && styles.btnDisabled]}
+                  activeOpacity={0.85}
+                  disabled={updating}
+                  onPress={onCompletePress}
+                >
                   {updating ? (
                     <ActivityIndicator size="small" color="#fff" />
                   ) : (
-                    <Text style={styles.completeBtnText}>Complete ride</Text>
+                    <Text style={styles.completeBtnText}>{paidAtPickup ? 'Complete ride' : 'Collect fare'}</Text>
                   )}
                 </TouchableOpacity>
               )}
@@ -863,6 +1031,175 @@ export default function CaptainRideTrackingScreen() {
               >
                 {parcelLike && <ParcelDropdown ride={ride} />}
               </PersonCard>
+
+              <PayAtCard payAt={payAt} paid={paidAtPickup} changed={switchedToDrop} />
+
+              {/* Normal rides: fare reminder during the trip */}
+              {started && !parcelLike && !paidAtPickup && (
+                <View style={styles.noteBox}>
+                  <Ionicons name="cash-outline" size={22} color={AMBER} />
+                  <Text style={styles.noteText}>
+                    Please take your fare (₹{fare}) from the customer when you reach the drop.
+                  </Text>
+                </View>
+              )}
+
+              {/* Step 1: product lena (parcel / goods) */}
+              {needProductConfirm && (
+                <View style={styles.card}>
+                  <Text style={styles.eyebrow}>STEP 1 · TAKE THE PRODUCT</Text>
+                  <View style={styles.noteBox}>
+                    <Ionicons name="camera-outline" size={22} color={AMBER} />
+                    <Text style={styles.noteText}>
+                      Please take the product from the customer. Take a photo or video of it as proof.
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.primaryBtn, styles.btnGreen]}
+                    activeOpacity={0.85}
+                    onPress={() => setProductTaken(true)}
+                  >
+                    <Text style={styles.primaryBtnText}>Yes, I took the product</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Step 2: pickup par payment (sirf Pay at Pickup) */}
+              {needPickupPayment && (
+                <View style={styles.card}>
+                  <Text style={styles.eyebrow}>{parcelLike ? 'STEP 2 · ' : ''}COLLECT PAYMENT</Text>
+                  <View style={styles.payAmountBox}>
+                    <Text style={styles.payAmountLabel}>Total fare</Text>
+                    <Text style={styles.payAmount}>₹{fare}</Text>
+                  </View>
+                  <View style={styles.payMethodRow}>
+                    <Ionicons
+                      name={payMethod === 'CASH' ? 'cash-outline' : 'card-outline'}
+                      size={20}
+                      color={BLUE}
+                    />
+                    <Text style={styles.payMethodText}>
+                      {payMethod === 'CASH' ? 'Collect cash from the customer' : 'Paid online'}
+                    </Text>
+                  </View>
+                <TouchableOpacity
+  style={[styles.primaryBtn, styles.btnGreen, styles.btnTop, updating && styles.btnDisabled]}
+  activeOpacity={0.85}
+  disabled={updating}
+  onPress={() => {
+    if (payMethod === 'CASH') {
+      Alert.alert('Collect cash', `Have you collected ₹${fare} from the customer?`, [
+        { text: 'No', style: 'cancel' },
+        { text: 'Pay at drop', onPress: () => setSwitchedToDrop(true) },
+        { text: 'Yes, received', onPress: onPickupPaid },
+      ]);
+    } else {
+      onPickupPaid();
+    }
+  }}
+>
+  {updating ? (
+    <ActivityIndicator color="#fff" />
+  ) : (
+    <Text style={styles.primaryBtnText}>Payment received</Text>
+  )}
+</TouchableOpacity>
+                </View>
+              )}
+
+              {/* Receiver OTP verification (parcel rides, during the trip) */}
+              {parcelStage === 'otp' && (
+                <View style={styles.card}>
+                  <Text style={styles.eyebrow}>RECEIVER VERIFICATION</Text>
+                  <View style={styles.personRow}>
+                    <View style={[styles.avatar, styles.avatarFallback]}>
+                      <Ionicons name="person-outline" size={22} color={BLUE} />
+                    </View>
+                    <View style={styles.flex}>
+                      <Text style={styles.personName} numberOfLines={1}>
+                        {str(ride.receiverName) || 'Receiver'}
+                      </Text>
+                      {!!ride.receiverPhone && (
+                        <Text style={styles.personPhone}>{str(ride.receiverPhone)}</Text>
+                      )}
+                    </View>
+                    {!!ride.receiverPhone && (
+                      <TouchableOpacity
+                        style={styles.miniCall}
+                        activeOpacity={0.8}
+                        onPress={() => callNumber(str(ride.receiverPhone))}
+                      >
+                        <Ionicons name="call" size={15} color="#fff" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  <View style={[styles.noteBox, styles.hintTop]}>
+                    <Ionicons name="camera-outline" size={22} color={AMBER} />
+                    <Text style={styles.noteText}>
+                      Note: While handing over the parcel, take a photo or video of the delivery as proof.
+                    </Text>
+                  </View>
+
+                  <Text style={styles.modalHint}>
+                    Hand over the parcel to the receiver and ask for their 4-digit delivery OTP.
+                  </Text>
+                  <TextInput
+                    style={styles.otpInput}
+                    placeholder="----"
+                    placeholderTextColor={GREY}
+                    value={deliveryOtp}
+                    onChangeText={(t) => setDeliveryOtp(t.replace(/\D/g, '').slice(0, 4))}
+                    keyboardType="number-pad"
+                    maxLength={4}
+                  />
+                  <TouchableOpacity
+                    style={[
+                      styles.primaryBtn,
+                      styles.btnTop,
+                      (deliveryOtp.length !== 4 || updating) && styles.btnDisabled,
+                    ]}
+                    activeOpacity={0.85}
+                    disabled={deliveryOtp.length !== 4 || updating}
+                    onPress={onVerifyDeliveryOtp}
+                  >
+                    {updating ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.primaryBtnText}>Verify & deliver</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Payment (parcel rides, after the receiver OTP is verified) */}
+              {parcelStage === 'payment' && (
+                <View style={styles.card}>
+                  <View style={styles.verifiedRow}>
+                    <Ionicons name="checkmark-circle" size={20} color={GREEN} />
+                    <Text style={styles.verifiedText}>Parcel delivered & OTP verified</Text>
+                  </View>
+
+                  <Text style={styles.eyebrow}>PAYMENT</Text>
+                  <View style={styles.payAmountBox}>
+                    <Text style={styles.payAmountLabel}>Total fare</Text>
+                    <Text style={styles.payAmount}>₹{fare}</Text>
+                  </View>
+
+                  <View style={styles.payMethodRow}>
+                    <Ionicons
+                      name={payMethod === 'CASH' ? 'cash-outline' : 'card-outline'}
+                      size={20}
+                      color={BLUE}
+                    />
+                    <Text style={[styles.payMethodText, styles.flex]}>
+                      {paidAtPickup
+                        ? 'Already paid at pickup'
+                        : 'You have reached the drop. Please take your fare from the customer.'}
+                    </Text>
+                  </View>
+                </View>
+              )}
 
               {/* Trip details */}
               <View style={styles.card}>
@@ -966,8 +1303,8 @@ export default function CaptainRideTrackingScreen() {
             </ScrollView>
           </SheetBoundary>
 
-          {/* Main action (not shown during the trip: Complete ride is in the status row) */}
-          {!!nextAction && !started && (
+          {/* Main action (not shown during the trip; at ARRIVED only after product + payment steps) */}
+          {!!nextAction && !started && (status !== 'ARRIVED' || readyForOtp) && (
             <View style={[styles.footer, styles.footerRow]}>
               <TouchableOpacity
                 style={[styles.primaryBtn, styles.flex, updating && styles.btnDisabled]}
@@ -981,6 +1318,24 @@ export default function CaptainRideTrackingScreen() {
                   <Text style={styles.primaryBtnText}>
                     {ACTION_LABEL[status ?? ''] ?? nextAction.label}
                   </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {/* Parcel rides: Finish ride after delivery OTP + payment */}
+          {parcelStage === 'payment' && (
+            <View style={[styles.footer, styles.footerRow]}>
+              <TouchableOpacity
+                style={[styles.primaryBtn, styles.btnGreen, styles.flex, updating && styles.btnDisabled]}
+                activeOpacity={0.85}
+                disabled={updating}
+                onPress={onFinishPress}
+              >
+                {updating ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.primaryBtnText}>{paidAtPickup ? 'Finish ride' : 'Collect fare'}</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -1028,6 +1383,7 @@ export default function CaptainRideTrackingScreen() {
             <Text style={styles.modalHint}>
               Ask the customer for the 4-digit OTP shown on their phone, then start the trip to the drop location.
             </Text>
+
             <TextInput
               style={styles.otpInput}
               placeholder="----"
@@ -1188,25 +1544,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   completeBtnText: { color: '#fff', fontSize: 12.5, fontWeight: '800' },
-  completeBtnOff: { backgroundColor: '#CBD5E1' },
-  // earning strip
-  earnStrip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: BLUE,
-    borderRadius: 18,
-    paddingVertical: 12,
-    marginBottom: 12,
-  },
-  earnCol: { flex: 1, alignItems: 'center' },
-  earnDivider: { width: 1, height: 30, backgroundColor: 'rgba(255,255,255,0.25)' },
-  earnLabel: { color: '#DCE8FF', fontSize: 11, fontWeight: '600' },
-  earnValue: { color: '#fff', fontSize: 22, fontWeight: '800', marginTop: 2 },
-  earnValueSm: { color: '#fff', fontSize: 15, fontWeight: '800', marginTop: 4 },
 
   // cards
   card: { backgroundColor: '#fff', borderRadius: 16, padding: 14, marginBottom: 12 },
   cardTitle: { fontSize: 15, fontWeight: '800', color: BLACK },
+  payAtCard: { borderWidth: 1.5, borderColor: BLUE_LIGHT },
   cardHeadRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1234,7 +1576,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   callText: { color: '#fff', fontSize: 14, fontWeight: '800', marginLeft: 6 },
-  parcelDesc: { fontSize: 14.5, fontWeight: '700', color: BLACK },
 
   // vehicle + stops
   vehicleRow: {
@@ -1265,8 +1606,6 @@ const styles = StyleSheet.create({
     marginRight: 6,
   },
   catChipText: { fontSize: 11, fontWeight: '700', color: GREY },
-  fareChip: { backgroundColor: GREEN_LIGHT, borderRadius: 999, paddingVertical: 4, paddingHorizontal: 10 },
-  fareChipText: { fontSize: 12, fontWeight: '800', color: GREEN },
 
   stopRow: {
     flexDirection: 'row',
@@ -1333,6 +1672,58 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginLeft: 10,
   },
+
+  // parcel chips + description
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', paddingTop: 12 },
+  infoChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: BLUE_LIGHT,
+    borderRadius: 999,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  infoChipText: { fontSize: 12, fontWeight: '700', color: BLUE, marginLeft: 5 },
+  descBox: {
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: BORDER,
+    padding: 10,
+    marginTop: 2,
+    marginBottom: 4,
+  },
+  descText: { fontSize: 14, fontWeight: '600', color: BLACK, marginTop: 3, lineHeight: 20 },
+
+  // photo / video note
+  noteBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEF3C7',
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 14,
+  },
+  noteText: { flex: 1, marginLeft: 8, fontSize: 12.5, fontWeight: '600', color: '#92400E', lineHeight: 18 },
+
+  // receiver OTP + payment
+  hintTop: { marginTop: 14 },
+  verifiedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: GREEN_LIGHT,
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 14,
+  },
+  verifiedText: { marginLeft: 8, fontSize: 13.5, fontWeight: '800', color: GREEN },
+  payAmountBox: { alignItems: 'center', paddingVertical: 14, backgroundColor: BG, borderRadius: 12 },
+  payAmountLabel: { fontSize: 12, color: GREY, fontWeight: '700' },
+  payAmount: { fontSize: 32, fontWeight: '800', color: BLACK, marginTop: 4 },
+  payMethodRow: { flexDirection: 'row', alignItems: 'center', marginTop: 12 },
+  payMethodText: { marginLeft: 8, fontSize: 14, fontWeight: '700', color: BLACK },
 
   // distance / duration / fare
   miniStatsRow: { flexDirection: 'row', marginHorizontal: -3, marginBottom: 14 },

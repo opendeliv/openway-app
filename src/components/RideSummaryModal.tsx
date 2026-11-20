@@ -19,9 +19,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import api from '../services/CaptainaRideApi';
 import { CATEGORY_LABEL, prettyLabel } from './CaptainRideCard';
 
-// ================= RIDE SUMMARY (payment + details + rating) =================
-// After a ride completes, a popup opens here:
+// ================= DELIVERY SUMMARY (payment + details + rating) =================
+// After the receiver OTP is verified, a popup opens here:
 // payment (Cash / Use my own QR) -> success tick + full details -> rating
+// The summary also shows WHEN the customer paid: at pickup or at drop.
 
 const BLUE = '#1F6FE5';
 const BLUE_LIGHT = '#EAF2FF';
@@ -37,13 +38,17 @@ const GOLD = '#F59E0B';
 // The summary popup opens automatically only within this time after completion
 export const SUMMARY_WINDOW_MS = 10 * 60 * 1000;
 
-// IDs of rides whose popup was closed (or payment + rating done), saved on the phone
+// IDs of orders whose popup was closed (or payment + rating done), saved on the phone
 export const DISMISSED_KEY = 'captain_dismissed_summaries';
 
 // Captain's UPI QR saved on the phone (picked from gallery)
 const QR_STORAGE_KEY = 'captain_upi_qr_uri';
 
+// Remembers on the phone whether payment came at pickup or at drop
+const payStageKey = (id: string) => `pay_stage_${id}`;
+
 type PayMethod = 'CASH' | 'UPI';
+type PayStage = 'PICKUP' | 'DROP';
 
 type RideDetail = {
   id: string;
@@ -61,6 +66,11 @@ const RATING_TEXT: Record<number, string> = {
   3: 'Okay',
   4: 'Good',
   5: 'Excellent',
+};
+
+const STAGE_TEXT: Record<PayStage, string> = {
+  PICKUP: '📍 At pickup',
+  DROP: '🏁 At drop',
 };
 
 const getErrorMessage = (e: any, fallback: string) => {
@@ -89,6 +99,11 @@ const tripMinutes = (start?: string | null, end?: string | null) => {
   return Math.max(1, Math.round(ms / 60000));
 };
 
+const toStage = (v: unknown): PayStage | null => {
+  const s = String(v ?? '').toUpperCase();
+  return s === 'PICKUP' || s === 'DROP' ? (s as PayStage) : null;
+};
+
 // One "label : value" line
 const InfoRow = ({ label, value }: { label: string; value: string }) => (
   <View style={sm.infoRow}>
@@ -114,6 +129,9 @@ export default function RideSummaryModal({
   const [qrMode, setQrMode] = useState(false);
   const [qrUri, setQrUri] = useState<string | null>(null);
   const [paying, setPaying] = useState(false);
+  const [storedStage, setStoredStage] = useState<PayStage | null>(null);
+  const [pickupMethod, setPickupMethod] = useState<PayMethod | null>(null);
+  const [checkedPickup, setCheckedPickup] = useState(false);
 
   // rating
   const [rating, setRating] = useState(0);
@@ -131,12 +149,35 @@ export default function RideSummaryModal({
   const paidMethod: PayMethod | null = ride.paymentMethod ?? null;
   const rated = ratedLocal || ride.userRating != null;
 
+  // When did the customer pay: backend value > pickup flag > saved on phone > default DROP
+  const payStage: PayStage | null = !paid
+    ? null
+    : toStage(ride.paymentStage) ??
+      (ride.pickupPaymentDone ? 'PICKUP' : null) ??
+      storedStage ??
+      'DROP';
+
+  // What the customer chose when booking (pay at pickup / pay at drop)
+  const customerChoice = toStage(ride.payAt);
+
+  const payTimeText = paid ? `${formatDate(ride.paidAt)}, ${formatTime(ride.paidAt)}` : '-';
+
   // Load the saved QR
   useEffect(() => {
     AsyncStorage.getItem(QR_STORAGE_KEY)
       .then((v) => v && setQrUri(v))
       .catch(() => {});
   }, []);
+
+  // Load the saved payment stage (pickup / drop)
+  useEffect(() => {
+    AsyncStorage.getItem(payStageKey(captainRideId))
+      .then((v) => {
+        const s = toStage(v);
+        if (s) setStoredStage(s);
+      })
+      .catch(() => {});
+  }, [captainRideId]);
 
   // Captain's own name (if the backend returns it from /captains/me)
   useEffect(() => {
@@ -198,10 +239,16 @@ export default function RideSummaryModal({
   };
 
   // ---------- save payment ----------
-  const savePayment = async (method: PayMethod) => {
+  // stage = when the payment was taken: at pickup or at drop
+  const savePayment = async (method: PayMethod, stage: PayStage) => {
     try {
       setPaying(true);
-      await api.patch(`/captain-rides/${captainRideId}/payment`, { method });
+      await api.patch(`/captain-rides/${captainRideId}/payment`, { method, stage });
+
+      // Remember on the phone whether it was pickup or drop
+      setStoredStage(stage);
+      AsyncStorage.setItem(payStageKey(captainRideId), stage).catch(() => {});
+
       await fetchDetail();
     } catch (e: any) {
       Alert.alert('Payment not saved', getErrorMessage(e, 'Please try again'));
@@ -210,11 +257,29 @@ export default function RideSummaryModal({
     }
   };
 
+  // Payment already taken at pickup? Save it here automatically (stage = PICKUP)
+  useEffect(() => {
+    AsyncStorage.getItem(`pickup_paid_${captainRideId}`)
+      .then((v) => {
+        if (v === 'CASH' || v === 'UPI') setPickupMethod(v);
+      })
+      .catch(() => {})
+      .finally(() => setCheckedPickup(true));
+  }, [captainRideId]);
+
+  useEffect(() => {
+    if (!data || paid || !pickupMethod || paying) return;
+    savePayment(pickupMethod, 'PICKUP').then(() =>
+      AsyncStorage.removeItem(`pickup_paid_${captainRideId}`).catch(() => {}),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, paid, pickupMethod]);
+
   const onCashPress = () => {
     if (paying) return;
     Alert.alert('Cash payment', `Did you receive ₹${fare} in cash?`, [
       { text: 'No', style: 'cancel' },
-      { text: 'Yes, received', onPress: () => savePayment('CASH') },
+      { text: 'Yes, received', onPress: () => savePayment('CASH', 'DROP') },
     ]);
   };
 
@@ -222,7 +287,7 @@ export default function RideSummaryModal({
     if (paying) return;
     Alert.alert('UPI payment', `Did the customer pay ₹${fare} via UPI?`, [
       { text: 'No', style: 'cancel' },
-      { text: 'Yes, received', onPress: () => savePayment('UPI') },
+      { text: 'Yes, received', onPress: () => savePayment('UPI', 'DROP') },
     ]);
   };
 
@@ -258,30 +323,34 @@ export default function RideSummaryModal({
 
   // ---------- UI ----------
   const mins = tripMinutes(data?.startedAt, data?.completedAt);
-  const customerName =
-    ride.user?.name ?? ride.userName ?? ride.passengerName ?? ride.riderName;
-  const customerPhone =
-    ride.user?.phone ?? ride.userPhone ?? ride.passengerPhone ?? ride.riderPhone;
-  const isParcelLike = ride.category === 'PARCEL' || ride.category === 'GOODS';
+
+  // Customer = the person who placed the order (sender)
+  const customerName = ride.user?.name ?? ride.userName ?? ride.senderName;
+  const customerPhone = ride.user?.phone ?? ride.userPhone ?? ride.senderPhone;
   const categoryLabel =
     (CATEGORY_LABEL as Record<string, string>)[ride.category] ?? '-';
+
+  const stageText = payStage ? STAGE_TEXT[payStage] : '-';
+  const methodText = paidMethod === 'CASH' ? 'Cash' : 'UPI QR';
+
+  const showLoader = loading || !checkedPickup || (!!data && !paid && !!pickupMethod);
 
   return (
     // Android back does not close the popup (before payment / rating)
     <Modal visible animationType="slide" onRequestClose={() => {}}>
       <SafeAreaView style={sm.container} edges={['top', 'bottom']}>
-        {loading ? (
+        {showLoader ? (
           <View style={sm.center}>
             <ActivityIndicator size="large" color={BLUE} />
           </View>
-      ) : !data ? (
-  <View style={sm.center}>
-    <Text style={sm.muted}>Could not load ride details</Text>
-    <TouchableOpacity style={sm.retryBtn} onPress={fetchDetail}>
-      <Text style={sm.retryText}>Try again</Text>
-    </TouchableOpacity>
-  </View>
-) : (
+        ) : !data ? (
+          <View style={sm.center}>
+            <Text style={sm.muted}>Could not load order details</Text>
+            <TouchableOpacity style={sm.retryBtn} onPress={fetchDetail}>
+              <Text style={sm.retryText}>Try again</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
           <ScrollView
             contentContainerStyle={sm.scroll}
             keyboardShouldPersistTaps="handled"
@@ -289,9 +358,10 @@ export default function RideSummaryModal({
           >
             {!paid ? (
               <>
-  
-                <Text style={sm.done}>Ride completed</Text>
-                <Text style={sm.doneSub}>Collect the payment from the customer</Text>
+                <Text style={sm.done}>Delivery completed</Text>
+                <Text style={sm.doneSub}>
+                  You have reached the drop. Please take your fare from the customer.
+                </Text>
 
                 <View style={sm.amountCard}>
                   <Text style={sm.amountLabel}>Total fare</Text>
@@ -404,23 +474,68 @@ export default function RideSummaryModal({
                   </Animated.View>
                   <Text style={sm.successTitle}>Payment Successful</Text>
                   <Text style={sm.successAmount}>₹ {fare}</Text>
-                  <Text style={sm.successSub}>
-                    Received via {paidMethod === 'CASH' ? 'Cash' : 'UPI QR'}
-                  </Text>
+                  <Text style={sm.successSub}>Received via {methodText}</Text>
+
+                  {!!payStage && (
+                    <View style={sm.stageBadge}>
+                      <Text style={sm.stageBadgeText}>
+                        {payStage === 'PICKUP'
+                          ? '📍 Customer paid at pickup'
+                          : '🏁 Customer paid at drop'}
+                      </Text>
+                    </View>
+                  )}
+                  <Text style={sm.successTime}>{payTimeText}</Text>
                 </View>
 
-                {/* ============ FULL DETAILS ============ */}
+                {/* ============ PAYMENT DETAILS ============ */}
                 <View style={sm.card}>
-                  <Text style={sm.cardTitle}>Ride details</Text>
+                  <Text style={sm.cardTitle}>Payment details</Text>
+                  <View style={sm.infoBlock}>
+                    <InfoRow label="Amount" value={`₹ ${fare}`} />
+                    <InfoRow label="Paid at" value={stageText} />
+                    <InfoRow label="Method" value={methodText} />
+                    <InfoRow label="Payment time" value={payTimeText} />
+                    {!!customerChoice && (
+                      <InfoRow
+                        label="Customer's choice"
+                        value={customerChoice === 'PICKUP' ? 'Pay at Pickup' : 'Pay at Drop'}
+                      />
+                    )}
+                    {!!customerChoice && !!payStage && customerChoice !== payStage && (
+                      <InfoRow
+                        label="Note"
+                        value={
+                          payStage === 'DROP'
+                            ? 'Not paid at pickup, paid at drop'
+                            : 'Paid at pickup, before the drop'
+                        }
+                      />
+                    )}
+                    <InfoRow label="Status" value="Paid" />
+                  </View>
+                </View>
+
+                {/* ============ ORDER DETAILS ============ */}
+                <View style={sm.card}>
+                  <Text style={sm.cardTitle}>Order details</Text>
 
                   <View style={sm.infoBlock}>
                     <InfoRow
-                      label="Ride ID"
+                      label="Order ID"
                       value={`#${String(ride.id ?? data.id).slice(0, 8).toUpperCase()}`}
                     />
                     <InfoRow label="Date" value={formatDate(data.completedAt)} />
                     <InfoRow label="Type" value={categoryLabel} />
-                    <InfoRow label="Vehicle" value={prettyLabel(ride.vehicleType) || '-'} />
+                  </View>
+
+                  {/* Vehicle chip */}
+                  <View style={sm.chipRow}>
+                    <View style={sm.chip}>
+                      <Text style={sm.chipText}>
+                        {prettyLabel(ride.vehicleType) || '-'}
+                      </Text>
+                    </View>
                   </View>
 
                   <View style={sm.placeRow}>
@@ -458,36 +573,37 @@ export default function RideSummaryModal({
                   </View>
 
                   <View style={sm.infoBlock}>
-                    <InfoRow label="Ride accepted" value={formatTime(data.acceptedAt)} />
-                    <InfoRow label="Ride started" value={formatTime(data.startedAt)} />
-                    <InfoRow label="Ride completed" value={formatTime(data.completedAt)} />
+                    <InfoRow label="Order accepted" value={formatTime(data.acceptedAt)} />
+                    <InfoRow label="Pickup done" value={formatTime(data.startedAt)} />
+                    <InfoRow label="Delivered" value={formatTime(data.completedAt)} />
+                    <InfoRow
+                      label={`Payment received (${payStage === 'PICKUP' ? 'Pickup' : 'Drop'})`}
+                      value={formatTime(ride.paidAt)}
+                    />
                   </View>
                 </View>
 
+                {/* ============ SENDER / RECEIVER / PARCEL ============ */}
                 <View style={sm.card}>
-                  <Text style={sm.cardTitle}>Customer</Text>
+                  <Text style={sm.cardTitle}>Sender</Text>
                   <View style={sm.infoBlock}>
                     <InfoRow label="Name" value={customerName || '-'} />
                     <InfoRow label="Phone" value={customerPhone || '-'} />
                   </View>
 
-                  {isParcelLike && (
-                    <View style={sm.infoBlock}>
-                      {!!ride.senderName && (
-                        <InfoRow label="Sender" value={ride.senderName} />
-                      )}
-                      <InfoRow label="Receiver" value={ride.receiverName || '-'} />
-                      {!!ride.receiverPhone && (
-                        <InfoRow label="Receiver phone" value={ride.receiverPhone} />
-                      )}
-                      {!!ride.parcelDescription && (
-                        <InfoRow label="Package" value={ride.parcelDescription} />
-                      )}
-                      {!!ride.parcelSize && (
-                        <InfoRow label="Size" value={prettyLabel(ride.parcelSize)} />
-                      )}
-                    </View>
-                  )}
+                  <Text style={[sm.cardTitle, sm.cardTitleGap]}>Receiver</Text>
+                  <View style={sm.infoBlock}>
+                    <InfoRow label="Name" value={ride.receiverName || '-'} />
+                    <InfoRow label="Phone" value={ride.receiverPhone || '-'} />
+                  </View>
+
+                  <Text style={[sm.cardTitle, sm.cardTitleGap]}>Parcel</Text>
+                  <View style={sm.infoBlock}>
+                    {!!ride.parcelSize && (
+                      <InfoRow label="Size" value={prettyLabel(ride.parcelSize)} />
+                    )}
+                    <InfoRow label="Description" value={ride.parcelDescription || '-'} />
+                  </View>
                 </View>
 
                 <View style={sm.card}>
@@ -500,8 +616,9 @@ export default function RideSummaryModal({
                     />
                     <InfoRow
                       label="Payment"
-                      value={`${paidMethod === 'CASH' ? 'Cash' : 'UPI QR'}  •  ${formatTime(ride.paidAt)}`}
+                      value={`${methodText}  •  ${formatTime(ride.paidAt)}`}
                     />
+                    <InfoRow label="Paid at" value={stageText} />
                     <InfoRow label="Status" value="Paid" />
                   </View>
                 </View>
@@ -589,10 +706,8 @@ const sm = StyleSheet.create({
   },
   primaryBtnText: { color: '#fff', fontSize: 15, fontWeight: '800' },
 
-  closeLink: { alignSelf: 'flex-end', paddingVertical: 6, paddingHorizontal: 4 },
-  closeText: { color: GREY, fontSize: 13, fontWeight: '700' },
   done: { fontSize: 24, fontWeight: '800', color: BLACK, marginTop: 2 },
-  doneSub: { fontSize: 14, color: GREY, marginTop: 2, marginBottom: 14 },
+  doneSub: { fontSize: 14, color: GREY, marginTop: 2, marginBottom: 14, lineHeight: 20 },
 
   retryBtn: {
     marginTop: 12,
@@ -621,6 +736,7 @@ const sm = StyleSheet.create({
     marginBottom: 14,
   },
   cardTitle: { fontSize: 16, fontWeight: '800', color: BLACK },
+  cardTitleGap: { marginTop: 16 },
   rowBetween: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -674,6 +790,7 @@ const sm = StyleSheet.create({
     backgroundColor: '#fff',
     borderRadius: 18,
     paddingVertical: 24,
+    paddingHorizontal: 16,
     marginBottom: 14,
   },
   tickCircle: {
@@ -688,6 +805,15 @@ const sm = StyleSheet.create({
   successTitle: { fontSize: 20, fontWeight: '800', color: GREEN, marginTop: 14 },
   successAmount: { fontSize: 34, fontWeight: '800', color: BLACK, marginTop: 4 },
   successSub: { fontSize: 14, color: GREY, marginTop: 4 },
+  stageBadge: {
+    backgroundColor: GREEN_LIGHT,
+    borderRadius: 999,
+    paddingVertical: 7,
+    paddingHorizontal: 14,
+    marginTop: 12,
+  },
+  stageBadgeText: { color: GREEN, fontSize: 13, fontWeight: '800', textAlign: 'center' },
+  successTime: { fontSize: 12.5, color: GREY, marginTop: 8 },
 
   infoBlock: {
     backgroundColor: BG,
@@ -710,6 +836,16 @@ const sm = StyleSheet.create({
     fontWeight: '700',
     color: BLACK,
   },
+
+  // vehicle chip
+  chipRow: { flexDirection: 'row', marginTop: 12 },
+  chip: {
+    backgroundColor: BLUE_LIGHT,
+    borderRadius: 999,
+    paddingVertical: 5,
+    paddingHorizontal: 14,
+  },
+  chipText: { fontSize: 13, fontWeight: '800', color: BLUE },
 
   placeRow: { flexDirection: 'row', alignItems: 'flex-start', marginTop: 14 },
   dot: { width: 10, height: 10, borderRadius: 5, marginTop: 5, marginRight: 10 },

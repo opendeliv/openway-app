@@ -18,7 +18,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import Ionicons from 'react-native-vector-icons/Ionicons';
-
+import FindingCaptain from './FindingCaptain';
 import { ridesApi } from './services/ridesApi';
 import { mapsApi, decodePolyline, RouteInfo } from './services/mapsApi';
 
@@ -32,9 +32,10 @@ const RED = '#DC2626';
 const GREEN = '#16A34A';
 const GREEN_LIGHT = '#DCFCE7';
 const STAR = '#F59E0B';
+const VIOLET = '#7C3AED';
+const VIOLET_LIGHT = '#EDE9FE';
 
 const POLL_MS = 4000;
-const NEAR_DROP_METERS = 150;
 
 // Sheet snap points, as a share of the screen body height.
 // Default: map 36% / details 64%.  Pulled down: map 50% / details 50%.
@@ -53,6 +54,8 @@ type RideStatus =
   | 'COMPLETED'
   | 'CANCELLED';
 
+type PayStage = 'PICKUP' | 'DROP';
+
 type RideData = {
   id: string;
   status: RideStatus;
@@ -68,7 +71,13 @@ type RideData = {
   distance: number | null;
   duration: number | null;
   paymentMethod?: 'CASH' | 'UPI' | null;
+  payAt?: PayStage | string | null; // what the customer chose: pay at pickup / drop
+  paymentStage?: PayStage | string | null; // when the payment was actually taken
+  pickupPaymentDone?: boolean | null;
+  paidAt?: string | null;
   captainRating?: number | null;
+  acceptedAt?: string | null;
+  startedAt?: string | null;
   completedAt?: string | null;
   createdAt?: string;
   captain?: {
@@ -76,7 +85,16 @@ type RideData = {
     phone?: string | number | null;
     profilePhoto?: string | null;
   } | null;
-  otp?: string | number | null;
+  otp?: string | number | null; // pickup OTP (captain enters it to start)
+  deliveryOtp?: string | number | null; // delivery OTP (captain enters it at drop)
+  senderName?: string | null;
+  senderPhone?: string | null;
+  receiverName?: string | null;
+  receiverPhone?: string | null;
+  parcelSize?: string | null;
+  parcelWeight?: string | number | null;
+  parcelDescription?: string | null;
+  isFragile?: boolean | null;
   captainEtaMinutes?: number | null;
   captainLatitude?: number | null;
   captainLongitude?: number | null;
@@ -101,6 +119,11 @@ const num = (v: unknown): number | null => {
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
+const toStage = (v: unknown): PayStage | null => {
+  const s = str(v).toUpperCase();
+  return s === 'PICKUP' || s === 'DROP' ? (s as PayStage) : null;
+};
+
 // Backend vehicleType -> label shown to the user (same names as the booking screen)
 const VEHICLE_LABELS: Record<string, string> = {
   lite: 'Lite Bike',
@@ -116,6 +139,10 @@ const VEHICLE_LABELS: Record<string, string> = {
   cycle: 'Cycle',
   tata_ace: 'Tata Ace',
   pickup: 'Pickup',
+  mini_van: 'Mini Van',
+  utility_van: 'Utility Van',
+  eicher: 'Eicher',
+  mahindra_furio: 'Mahindra Furio',
 };
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -125,21 +152,23 @@ const CATEGORY_LABELS: Record<string, string> = {
   GOODS: 'Goods delivery',
 };
 
+const RATING_TEXT: Record<number, string> = {
+  1: 'Very bad',
+  2: 'Poor',
+  3: 'Okay',
+  4: 'Good',
+  5: 'Excellent',
+};
+
 const vehicleLabel = (id?: string | null) => {
   const k = str(id);
   if (!k) return '--';
   return VEHICLE_LABELS[k] ?? k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
-const metersBetween = (aLat: number, aLng: number, bLat: number, bLng: number) => {
-  const R = 6371000;
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(bLat - aLat);
-  const dLng = toRad(bLng - aLng);
-  const x =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(x));
+const prettyText = (v?: string | null) => {
+  const s = str(v).replace(/_/g, ' ').toLowerCase();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
 };
 
 const formatDate = (iso?: string | null) => {
@@ -150,6 +179,20 @@ const formatDate = (iso?: string | null) => {
     month: 'short',
     hour: 'numeric',
     minute: '2-digit',
+  });
+};
+
+const formatTime = (iso?: string | null) => {
+  if (!iso) return '-';
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
+const formatDay = (iso?: string | null) => {
+  if (!iso) return '-';
+  return new Date(iso).toLocaleDateString([], {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
   });
 };
 
@@ -192,36 +235,16 @@ class SheetBoundary extends React.Component<
    SMALL PIECES
    ========================================================= */
 
-const SearchingPulse = () => {
-  const scale = useRef(new Animated.Value(0)).current;
 
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.timing(scale, {
-        toValue: 1,
-        duration: 1600,
-        easing: Easing.out(Easing.ease),
-        useNativeDriver: true,
-      }),
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [scale]);
-
-  const ringStyle = {
-    transform: [{ scale: scale.interpolate({ inputRange: [0, 1], outputRange: [0.5, 2.2] }) }],
-    opacity: scale.interpolate({ inputRange: [0, 1], outputRange: [0.5, 0] }),
-  };
-
-  return (
-    <View style={styles.pulseWrap}>
-      <Animated.View style={[styles.pulseRing, ringStyle]} />
-      <View style={styles.pulseCore}>
-        <Ionicons name="navigate" size={34} color={BLUE} />
-      </View>
-    </View>
-  );
-};
+// One "label : value" line
+const InfoRow = ({ label, value }: { label: string; value: string }) => (
+  <View style={styles.infoRow}>
+    <Text style={styles.infoLabel}>{label}</Text>
+    <Text style={styles.infoValue} numberOfLines={2}>
+      {value}
+    </Text>
+  </View>
+);
 
 const CaptainCard = ({ ride, showCall = true }: { ride: RideData; showCall?: boolean }) => {
   const c = ride.captain;
@@ -286,22 +309,324 @@ const CaptainCard = ({ ride, showCall = true }: { ride: RideData; showCall?: boo
   );
 };
 
+// Payment card shown while the order is active: tells the customer WHEN to pay
+const PayNowCard = ({ ride }: { ride: RideData }) => {
+  const choice: PayStage = toStage(ride.payAt) ?? 'DROP';
+  const fare = ride.fare != null ? `₹${ride.fare}` : 'the fare';
+  const paidAtPickup = !!ride.pickupPaymentDone || toStage(ride.paymentStage) === 'PICKUP';
+  const status = ride.status;
+
+  let title = '';
+  let sub = '';
+  let icon: string = 'flag';
+  let done = false;
+
+  if (paidAtPickup) {
+    title = 'Paid at pickup';
+    sub = 'Your payment was received by the captain at the pickup location.';
+    icon = 'checkmark-circle';
+    done = true;
+  } else if (choice === 'PICKUP') {
+    if (status === 'STARTED') {
+      title = 'Pay at drop';
+      sub = `Payment was not made at pickup. Please pay ${fare} to the captain when you reach the drop.`;
+      icon = 'flag';
+    } else if (status === 'ARRIVED') {
+      title = 'Pay at pickup';
+      sub = `Captain has arrived. Please pay ${fare} to the captain now.`;
+      icon = 'location';
+    } else {
+      title = 'Pay at pickup';
+      sub = `You will pay ${fare} to the captain at the pickup location.`;
+      icon = 'location';
+    }
+  } else if (status === 'STARTED') {
+    title = 'Pay at drop';
+    sub = `Please pay ${fare} to the captain when you reach the drop.`;
+    icon = 'flag';
+  } else {
+    title = 'Pay at drop';
+    sub = `You will pay ${fare} to the captain at the drop location.`;
+    icon = 'flag';
+  }
+
+  return (
+    <View style={[styles.card, styles.payNowCard, done && styles.payNowCardDone]}>
+      <Text style={styles.cardEyebrow}>PAYMENT</Text>
+      <View style={styles.captainRow}>
+        <View style={[styles.avatar, styles.avatarFallback, done && styles.avatarDone]}>
+          <Ionicons name={icon} size={22} color={done ? GREEN : BLUE} />
+        </View>
+        <View style={styles.flex}>
+          <Text style={[styles.captainName, done && { color: GREEN }]}>{title}</Text>
+          <Text style={styles.captainSub}>{sub}</Text>
+        </View>
+      </View>
+    </View>
+  );
+};
+
+// Captain on the way: highlighted banner with pulsing dot + big ETA
+const OnTheWayBanner = ({ eta, name }: { eta: number | null | undefined; name: string }) => {
+  const pulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(pulse, {
+        toValue: 1,
+        duration: 1300,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+
+  const ring = {
+    transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 2.4] }) }],
+    opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }),
+  };
+
+  return (
+    <View style={styles.onWayBanner}>
+      <View style={styles.onWayDotWrap}>
+        <Animated.View style={[styles.onWayRing, ring]} />
+        <View style={styles.onWayDot} />
+      </View>
+      <View style={styles.flex}>
+        <Text style={styles.onWayTitle}>Captain is on the way</Text>
+        <Text style={styles.onWaySub} numberOfLines={2}>
+          {name} aapke pickup location par aa raha hai
+        </Text>
+      </View>
+      <View style={styles.onWayEta}>
+        <Text style={styles.onWayEtaValue}>{eta != null ? eta : '--'}</Text>
+        <Text style={styles.onWayEtaUnit}>min</Text>
+      </View>
+    </View>
+  );
+};
+
+type StepState = 'done' | 'current' | 'locked' | 'later';
+
+const StepDot = ({ state, index }: { state: StepState; index: number }) => (
+  <View
+    style={[
+      styles.stepDot,
+      state === 'done' && styles.stepDotDone,
+      state === 'current' && styles.stepDotCurrent,
+      state === 'later' && styles.stepDotLater,
+    ]}
+  >
+    {state === 'done' ? (
+      <Ionicons name="checkmark" size={15} color="#fff" />
+    ) : state === 'later' ? (
+      <Ionicons name="time-outline" size={15} color={BLUE} />
+    ) : (
+      <Text style={[styles.stepDotText, state === 'current' && { color: '#fff' }]}>{index + 1}</Text>
+    )}
+  </View>
+);
+
+// ARRIVED: 1) give product  2) pickup payment  3) pickup OTP
+const PickupSteps = ({
+  ride,
+  productGiven,
+  onProductGiven,
+}: {
+  ride: RideData;
+  productGiven: boolean;
+  onProductGiven: () => void;
+}) => {
+  const cat = str(ride.category).toUpperCase();
+  const parcelLike = cat === 'PARCEL' || cat === 'GOODS';
+  const payAtPickup = (toStage(ride.payAt) ?? 'DROP') === 'PICKUP';
+  const fare = ride.fare != null ? `₹${ride.fare}` : 'the fare';
+  const method = ride.paymentMethod === 'UPI' ? 'UPI' : 'Cash';
+
+  const paidAtPickup = !!ride.pickupPaymentDone || toStage(ride.paymentStage) === 'PICKUP';
+  // Captain ne payment le li => product bhi ja chuka hai
+  const productDone = !parcelLike || productGiven || paidAtPickup;
+const otpReady = productDone;
+
+  const otpDigits = (str(ride.otp) || '----').split('');
+
+  const steps: { key: 'product' | 'pay' | 'otp'; title: string; sub?: string; state: StepState }[] = [];
+
+  if (parcelLike) {
+    steps.push({
+      key: 'product',
+      title: 'Give your product to captain',
+      sub: productDone ? 'Product handed over' : undefined,
+      state: productDone ? 'done' : 'current',
+    });
+  }
+
+steps.push({
+  key: 'pay',
+  title: !payAtPickup
+    ? 'Payment at drop'
+    : paidAtPickup
+    ? 'Pickup payment received'
+    : 'Pay your pickup payment',
+  sub: !payAtPickup
+    ? `You will pay ${fare} at the drop location`
+    : paidAtPickup
+    ? `Captain confirmed ${fare} (${method}) received`
+    : undefined,
+  state: !payAtPickup ? 'later' : paidAtPickup ? 'done' : productDone ? 'current' : 'locked',
+});
+
+  steps.push({
+    key: 'otp',
+    title: 'Share OTP with captain',
+    state: otpReady ? 'current' : 'locked',
+  });
+
+  return (
+    <View style={styles.stepsPanel}>
+      <Text style={styles.cardEyebrow}>PICKUP STEPS</Text>
+
+      {steps.map((s, i) => (
+        <View key={s.key}>
+          <View style={styles.stepRow}>
+            <StepDot state={s.state} index={i} />
+            <View style={styles.flex}>
+              <Text style={[styles.stepTitle, s.state === 'locked' && styles.stepTitleLocked]}>
+                {s.title}
+              </Text>
+              {!!s.sub && <Text style={styles.stepSub}>{s.sub}</Text>}
+            </View>
+          </View>
+
+          {/* Body only for the step that is active right now */}
+          {s.state === 'current' && s.key === 'product' && (
+            <View style={styles.stepBody}>
+              <View style={styles.otpNote}>
+                <Ionicons name="camera-outline" size={15} color="#B45309" />
+                <Text style={styles.otpNoteText}>
+                  Product dene se pehle uski photo / video le lo.
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.btn, styles.stepBtn]}
+                activeOpacity={0.85}
+                onPress={onProductGiven}
+              >
+                <Text style={styles.btnText}>Maine product de diya</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {s.state === 'current' && s.key === 'pay' && (
+            <View style={styles.stepBody}>
+              <View style={styles.payBox}>
+                <Text style={styles.payBoxLabel}>Pay to captain ({method})</Text>
+                <Text style={styles.payBoxAmount}>{fare}</Text>
+              </View>
+              <View style={styles.waitRow}>
+                <ActivityIndicator size="small" color={BLUE} />
+                <Text style={styles.waitText}>
+                  Captain "Payment received" dabayega to ye step apne aap complete ho jayega.
+                </Text>
+              </View>
+            </View>
+          )}
+
+          {s.state === 'current' && s.key === 'otp' && (
+            <View style={styles.stepBody}>
+              <Text style={styles.otpPanelTitle}>Pickup OTP</Text>
+              <View style={styles.otpDigitsRow}>
+                {otpDigits.map((d, idx) => (
+                  <View key={idx} style={styles.otpDigitBox}>
+                    <Text style={styles.otpDigit}>{d}</Text>
+                  </View>
+                ))}
+              </View>
+              <Text style={styles.otpPanelHint}>Delivery starts once the captain enters this OTP.</Text>
+            </View>
+          )}
+        </View>
+      ))}
+    </View>
+  );
+};
+// STARTED: receiver OTP. Violet theme so it looks different from the pickup OTP
+const ReceiverOtpPanel = ({ ride }: { ride: RideData }) => {
+  const digits = (str(ride.deliveryOtp) || '----').split('');
+  const name = str(ride.receiverName);
+  const phone = str(ride.receiverPhone);
+
+  return (
+    <View style={styles.rcvPanel}>
+      <View style={styles.rcvBadge}>
+        <Ionicons name="person" size={12} color="#fff" />
+        <Text style={styles.rcvBadgeText}>RECEIVER OTP</Text>
+      </View>
+
+      <Text style={styles.rcvTitle}>Ye OTP receiver ko batao</Text>
+      <Text style={styles.rcvWho}>
+        {name ? name : 'Receiver'}
+        {phone ? `  •  ${phone}` : ''}
+      </Text>
+
+      <View style={styles.rcvDigitsRow}>
+        {digits.map((d, i) => (
+          <View key={i} style={styles.rcvDigitBox}>
+            <Text style={styles.rcvDigit}>{d}</Text>
+          </View>
+        ))}
+      </View>
+
+      <View style={styles.rcvNote}>
+        <Ionicons name="shield-checkmark-outline" size={15} color="#5B21B6" />
+        <Text style={styles.rcvNoteText}>
+          Ye OTP tabhi do jab receiver ko product mil jaye. Captain delivery par receiver se ye OTP
+          maangega.
+        </Text>
+      </View>
+    </View>
+  );
+};
+
+// Trip details = dropdown (tap the header to open / close)
 const TripDetails = ({
   ride,
   onCancelPress,
+  defaultOpen = false,
 }: {
   ride: RideData;
   onCancelPress?: () => void;
+  defaultOpen?: boolean;
 }) => {
+  const [open, setOpen] = useState(defaultOpen);
   const [menuOpen, setMenuOpen] = useState(false);
   const cat = str(ride.category).toUpperCase();
   const iconName =
     cat === 'CAB' ? 'car-sport-outline' : cat === 'BIKE' ? 'bicycle-outline' : 'cube-outline';
 
+  const summary = `${vehicleLabel(ride.vehicleType)}${ride.fare != null ? `  •  ₹${ride.fare}` : ''}`;
+
   return (
     <View style={styles.card}>
+      {/* Header: tap to open / close */}
       <View style={styles.cardHeadRow}>
-        <Text style={[styles.cardTitle, styles.noMargin]}>Trip details</Text>
+        <TouchableOpacity
+          style={[styles.flex, styles.tripHeadTap]}
+          activeOpacity={0.7}
+          onPress={() => setOpen((v) => !v)}
+        >
+          <View style={styles.flex}>
+            <Text style={[styles.cardTitle, styles.noMargin]}>Trip details</Text>
+            {!open && (
+              <Text style={styles.tripSummary} numberOfLines={1}>
+                {summary}
+              </Text>
+            )}
+          </View>
+          <Ionicons name={open ? 'chevron-up' : 'chevron-down'} size={22} color={GREY} />
+        </TouchableOpacity>
 
         {!!onCancelPress && (
           <TouchableOpacity
@@ -315,72 +640,78 @@ const TripDetails = ({
         )}
       </View>
 
-      {/* Vehicle chosen at booking time */}
-      <View style={styles.vehicleRow}>
-        <View style={styles.vehicleIcon}>
-          <Ionicons name={iconName} size={20} color={BLUE} />
-        </View>
-        <View style={styles.flex}>
-          <Text style={styles.tripLabel}>Vehicle</Text>
-          <Text style={styles.vehicleName}>{vehicleLabel(ride.vehicleType)}</Text>
-        </View>
-        {!!CATEGORY_LABELS[cat] && (
-          <View style={styles.catChip}>
-            <Text style={styles.catChipText}>{CATEGORY_LABELS[cat]}</Text>
+      {open && (
+        <View style={styles.tripBody}>
+          {/* Vehicle chosen at booking time */}
+          <View style={styles.vehicleRow}>
+            <View style={styles.vehicleIcon}>
+              <Ionicons name={iconName} size={20} color={BLUE} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.tripLabel}>Vehicle</Text>
+              <Text style={styles.vehicleName}>{vehicleLabel(ride.vehicleType)}</Text>
+            </View>
+            {!!CATEGORY_LABELS[cat] && (
+              <View style={styles.catChip}>
+                <Text style={styles.catChipText}>{CATEGORY_LABELS[cat]}</Text>
+              </View>
+            )}
           </View>
-        )}
-      </View>
 
-      {/* Quick stats: distance / duration / fare */}
-      <View style={styles.miniStatsRow}>
-        <View style={styles.miniStat}>
-          <Ionicons name="navigate-outline" size={16} color={BLUE} />
-          <View style={styles.miniStatCol}>
-            <Text style={styles.miniStatValue}>
-              {ride.distance != null ? `${ride.distance} km` : '--'}
-            </Text>
-            <Text style={styles.miniStatLabel}>Distance</Text>
+          {/* Quick stats: distance / duration / fare */}
+          <View style={styles.miniStatsRow}>
+            <View style={styles.miniStat}>
+              <Ionicons name="navigate-outline" size={16} color={BLUE} />
+              <View style={styles.miniStatCol}>
+                <Text style={styles.miniStatValue}>
+                  {ride.distance != null ? `${ride.distance} km` : '--'}
+                </Text>
+                <Text style={styles.miniStatLabel}>Distance</Text>
+              </View>
+            </View>
+
+            <View style={styles.miniStat}>
+              <Ionicons name="time-outline" size={16} color={BLUE} />
+              <View style={styles.miniStatCol}>
+                <Text style={styles.miniStatValue}>
+                  {ride.duration != null ? `${ride.duration} min` : '--'}
+                </Text>
+                <Text style={styles.miniStatLabel}>Duration</Text>
+              </View>
+            </View>
+
+            <View style={styles.miniStat}>
+              <Ionicons name="cash-outline" size={16} color={BLUE} />
+              <View style={styles.miniStatCol}>
+                <Text style={styles.miniStatValue}>
+                  {ride.fare != null ? `₹${ride.fare}` : '--'}
+                </Text>
+                <Text style={styles.miniStatLabel}>Fare</Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.tripRow}>
+            <View style={styles.pickupDot} />
+            <View style={styles.flex}>
+              <Text style={styles.tripLabel}>Pickup</Text>
+              <Text style={styles.tripValue} numberOfLines={2}>
+                {str(ride.pickupAddress)}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.tripRow}>
+            <View style={styles.dropSquare} />
+            <View style={styles.flex}>
+              <Text style={styles.tripLabel}>Drop</Text>
+              <Text style={styles.tripValue} numberOfLines={2}>
+                {str(ride.dropAddress)}
+              </Text>
+            </View>
           </View>
         </View>
-
-        <View style={styles.miniStat}>
-          <Ionicons name="time-outline" size={16} color={BLUE} />
-          <View style={styles.miniStatCol}>
-            <Text style={styles.miniStatValue}>
-              {ride.duration != null ? `${ride.duration} min` : '--'}
-            </Text>
-            <Text style={styles.miniStatLabel}>Duration</Text>
-          </View>
-        </View>
-
-        <View style={styles.miniStat}>
-          <Ionicons name="cash-outline" size={16} color={BLUE} />
-          <View style={styles.miniStatCol}>
-            <Text style={styles.miniStatValue}>{ride.fare != null ? `₹${ride.fare}` : '--'}</Text>
-            <Text style={styles.miniStatLabel}>Fare</Text>
-          </View>
-        </View>
-      </View>
-
-      <View style={styles.tripRow}>
-        <View style={styles.pickupDot} />
-        <View style={styles.flex}>
-          <Text style={styles.tripLabel}>Pickup</Text>
-          <Text style={styles.tripValue} numberOfLines={2}>
-            {str(ride.pickupAddress)}
-          </Text>
-        </View>
-      </View>
-
-      <View style={styles.tripRow}>
-        <View style={styles.dropSquare} />
-        <View style={styles.flex}>
-          <Text style={styles.tripLabel}>Drop</Text>
-          <Text style={styles.tripValue} numberOfLines={2}>
-            {str(ride.dropAddress)}
-          </Text>
-        </View>
-      </View>
+      )}
 
       {/* 3-dot menu: cancel lives here so it is not one tap away */}
       <Modal
@@ -396,7 +727,7 @@ const TripDetails = ({
         >
           <View style={styles.menuSheet} onStartShouldSetResponder={() => true}>
             <View style={styles.menuHandle} />
-            <Text style={styles.menuTitle}>Ride options</Text>
+            <Text style={styles.menuTitle}>Order options</Text>
 
             <TouchableOpacity
               style={styles.menuItem}
@@ -408,8 +739,8 @@ const TripDetails = ({
             >
               <Ionicons name="close-circle-outline" size={24} color={RED} />
               <View style={[styles.flex, styles.menuItemText]}>
-                <Text style={styles.menuItemTitle}>Cancel ride</Text>
-                <Text style={styles.menuItemSub}>Stop this ride request</Text>
+                <Text style={styles.menuItemTitle}>Cancel order</Text>
+                <Text style={styles.menuItemSub}>Stop this order</Text>
               </View>
             </TouchableOpacity>
 
@@ -442,9 +773,10 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
   const [comment, setComment] = useState('');
   const [ratingSent, setRatingSent] = useState(false);
 
+  // Pickup steps (customer side)
+  const [productGiven, setProductGiven] = useState(false);
+
   const mapRef = useRef<MapView>(null);
-  const askedArrivalRef = useRef(false);
-  const askingRef = useRef(false);
 
   /* ---------- Draggable sheet (map <-> details) ---------- */
 
@@ -559,6 +891,19 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
 
   const status = ride?.status;
 
+  // Green tick animation (plays when the order is completed)
+  const tickScale = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (status !== 'COMPLETED') return;
+    tickScale.setValue(0);
+    Animated.spring(tickScale, {
+      toValue: 1,
+      friction: 5,
+      tension: 80,
+      useNativeDriver: true,
+    }).start();
+  }, [status, tickScale]);
+
   // Log the ride shape + value types whenever the status changes
   useEffect(() => {
     if (!ride) {
@@ -578,6 +923,10 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
       pickupLat: `${typeof ride.pickupLatitude} = ${String(ride.pickupLatitude)}`,
       dropLat: `${typeof ride.dropLatitude} = ${String(ride.dropLatitude)}`,
       fare: `${typeof ride.fare} = ${String(ride.fare)}`,
+      payAt: String(ride.payAt),
+      paymentStage: String(ride.paymentStage),
+      pickupPaymentDone: String(ride.pickupPaymentDone),
+      paidAt: String(ride.paidAt),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ride?.status]);
@@ -638,8 +987,8 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
   /* ---------- Actions ---------- */
 
   const onCancel = () => {
-    Alert.alert('Cancel ride?', 'Are you sure you want to cancel this ride?', [
-      { text: 'Keep ride', style: 'cancel' },
+    Alert.alert('Cancel order?', 'Are you sure you want to cancel this order?', [
+      { text: 'Keep order', style: 'cancel' },
       {
         text: 'Yes, cancel',
         style: 'destructive',
@@ -657,53 +1006,6 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
       },
     ]);
   };
-
-  const askReached = useCallback(() => {
-    if (askingRef.current) return;
-    askingRef.current = true;
-
-    Alert.alert(
-      'Reached your destination?',
-      'Please confirm that you have arrived at your drop location.',
-      [
-        {
-          text: 'Not yet',
-          style: 'cancel',
-          onPress: () => {
-            askingRef.current = false;
-          },
-        },
-        {
-          text: 'Yes, I have arrived',
-          onPress: async () => {
-            try {
-              setBusy(true);
-              await ridesApi.confirmArrival(rideId);
-              await fetchRide();
-            } catch (e: any) {
-              Alert.alert('Unable to end ride', e?.message || 'Please try again.');
-            } finally {
-              setBusy(false);
-              askingRef.current = false;
-            }
-          },
-        },
-      ],
-      { cancelable: false },
-    );
-  }, [rideId, fetchRide]);
-
-  // Ask once, automatically, when the captain gets close to the drop point
-  useEffect(() => {
-    if (status !== 'STARTED' || askedArrivalRef.current) return;
-    if (capLat == null || capLng == null || dropLat == null || dropLng == null) return;
-
-    const d = metersBetween(capLat, capLng, dropLat, dropLng);
-    if (d <= NEAR_DROP_METERS) {
-      askedArrivalRef.current = true;
-      askReached();
-    }
-  }, [status, capLat, capLng, askReached]); // eslint-disable-line
 
   const onSubmitRating = async () => {
     if (rating < 1) {
@@ -731,7 +1033,7 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
         <View style={styles.center}>
           {loadError ? (
             <>
-              <Text style={styles.bigTitle}>Unable to load your ride</Text>
+              <Text style={styles.bigTitle}>Unable to load your order</Text>
               <Text style={styles.bigSub}>Please check your connection and try again.</Text>
               <TouchableOpacity style={[styles.btn, styles.btnTop]} onPress={fetchRide}>
                 <Text style={styles.btnText}>Try again</Text>
@@ -747,42 +1049,7 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
 
   /* ---------- Searching for a captain ---------- */
   if (status === 'REQUESTED') {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-        <View style={styles.center}>
-          <SearchingPulse />
-          <Text style={styles.bigTitle}>Finding your captain</Text>
-          <Text style={styles.bigSub}>
-            Hang tight while we connect you with a nearby captain.
-          </Text>
-
-          <View style={[styles.card, styles.fullWidth]}>
-            <Text style={styles.tripLabel}>Pickup</Text>
-            <Text style={styles.tripValue} numberOfLines={1}>
-              {str(ride.pickupAddress)}
-            </Text>
-            <View style={styles.gap} />
-            <Text style={styles.tripLabel}>Drop</Text>
-            <Text style={styles.tripValue} numberOfLines={1}>
-              {str(ride.dropAddress)}
-            </Text>
-            <View style={styles.gap} />
-            <Text style={styles.tripLabel}>Your offer</Text>
-            <Text style={styles.tripValue}>{ride.fare != null ? `₹${ride.fare}` : '--'}</Text>
-          </View>
-        </View>
-
-        <View style={styles.footer}>
-          <TouchableOpacity
-            style={[styles.btnOutline, busy && styles.btnDisabled]}
-            onPress={onCancel}
-            disabled={busy}
-          >
-            <Text style={styles.btnOutlineText}>Cancel ride</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
+    return <FindingCaptain ride={ride} onCancel={onCancel} cancelling={busy} />;
   }
 
   /* ---------- Cancelled ---------- */
@@ -793,8 +1060,8 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
           <View style={[styles.bigCircle, { backgroundColor: '#FEE2E2' }]}>
             <Ionicons name="close" size={48} color={RED} />
           </View>
-          <Text style={styles.bigTitle}>Ride cancelled</Text>
-          <Text style={styles.bigSub}>You can book a new ride anytime.</Text>
+          <Text style={styles.bigTitle}>Order cancelled</Text>
+          <Text style={styles.bigSub}>You can place a new order anytime.</Text>
         </View>
         <View style={styles.footer}>
           <TouchableOpacity style={styles.btn} onPress={onClose}>
@@ -811,6 +1078,25 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
     const paymentLabel =
       ride.paymentMethod === 'CASH' ? 'Cash' : ride.paymentMethod === 'UPI' ? 'UPI' : '';
 
+    const cat = str(ride.category).toUpperCase();
+    const isParcelLike = cat === 'PARCEL' || cat === 'GOODS';
+
+    const paid = !!ride.paidAt || !!ride.paymentMethod;
+    // When did the payment happen: backend value > pickup flag > default DROP
+    const payStage: PayStage | null = !paid
+      ? null
+      : toStage(ride.paymentStage) ?? (ride.pickupPaymentDone ? 'PICKUP' : 'DROP');
+    const choice = toStage(ride.payAt);
+    const stageText = payStage === 'PICKUP' ? '📍 At pickup' : payStage === 'DROP' ? '🏁 At drop' : '-';
+    const payTimeText = ride.paidAt ? `${formatDay(ride.paidAt)}, ${formatTime(ride.paidAt)}` : '-';
+
+    const skipRating = () => {
+      Alert.alert('Skip rating?', 'You are leaving without rating the captain.', [
+        { text: 'I will rate', style: 'cancel' },
+        { text: 'Skip', style: 'destructive', onPress: onClose },
+      ]);
+    };
+
     return (
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <ScrollView
@@ -818,29 +1104,123 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
           contentContainerStyle={styles.scroll}
           keyboardShouldPersistTaps="handled"
         >
-          <View style={styles.successWrap}>
-            <View style={[styles.bigCircle, { backgroundColor: GREEN_LIGHT }]}>
-              <Ionicons name="checkmark" size={48} color={GREEN} />
-            </View>
-            <Text style={styles.bigTitle}>Ride completed</Text>
-            {!!ride.completedAt && <Text style={styles.bigSub}>{formatDate(ride.completedAt)}</Text>}
+          {/* Success: animated green tick + fare + when it was paid */}
+          <View style={styles.successCard}>
+            <Animated.View style={[styles.tickCircle, { transform: [{ scale: tickScale }] }]}>
+              <Text style={styles.tick}>✓</Text>
+            </Animated.View>
+            <Text style={styles.successTitle}>
+              {paid ? 'Payment Successful' : 'Delivery completed'}
+            </Text>
+            <Text style={styles.successAmount}>{ride.fare != null ? `₹ ${ride.fare}` : '--'}</Text>
+            {!!paymentLabel && <Text style={styles.successSub}>Paid via {paymentLabel}</Text>}
+            {!!payStage && (
+              <View style={[styles.stageBadge, styles.stageBadgeCenter]}>
+                <Text style={styles.stageBadgeText}>
+                  {payStage === 'PICKUP' ? '📍 You paid at pickup' : '🏁 You paid at drop'}
+                </Text>
+              </View>
+            )}
+            {!!ride.completedAt && (
+              <Text style={styles.successTime}>{formatDate(ride.completedAt)}</Text>
+            )}
           </View>
 
-          <View style={styles.card}>
-            <Text style={styles.tripLabel}>Total fare</Text>
-            <Text style={styles.fareBig}>{ride.fare != null ? `₹${ride.fare}` : '--'}</Text>
-            {!!paymentLabel && <Text style={styles.captainSub}>Paid via {paymentLabel}</Text>}
-          </View>
+          {/* Payment details */}
+          {paid && (
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Payment details</Text>
+              <View style={styles.infoBlock}>
+                <InfoRow label="Amount" value={ride.fare != null ? `₹${ride.fare}` : '-'} />
+                <InfoRow label="Paid at" value={stageText} />
+                <InfoRow label="Method" value={paymentLabel || '-'} />
+                <InfoRow label="Payment time" value={payTimeText} />
+                {!!choice && (
+                  <InfoRow
+                    label="Your choice"
+                    value={choice === 'PICKUP' ? 'Pay at Pickup' : 'Pay at Drop'}
+                  />
+                )}
+                {!!choice && !!payStage && choice !== payStage && (
+                  <InfoRow
+                    label="Note"
+                    value={
+                      payStage === 'DROP'
+                        ? 'Not paid at pickup, paid at drop'
+                        : 'Paid at pickup, before the drop'
+                    }
+                  />
+                )}
+                <InfoRow label="Status" value="Paid" />
+              </View>
+            </View>
+          )}
 
           <CaptainCard ride={ride} showCall={false} />
-          <TripDetails ride={ride} />
+          <TripDetails ride={ride} defaultOpen />
+
+          {/* Order details + timeline */}
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Order details</Text>
+            <View style={styles.infoBlock}>
+              <InfoRow label="Order ID" value={`#${String(ride.id).slice(0, 8).toUpperCase()}`} />
+              <InfoRow label="Date" value={formatDay(ride.completedAt ?? ride.createdAt)} />
+              <InfoRow label="Type" value={CATEGORY_LABELS[cat] ?? '-'} />
+              <InfoRow label="Vehicle" value={vehicleLabel(ride.vehicleType)} />
+            </View>
+
+            <View style={styles.infoBlock}>
+              <InfoRow label="Order accepted" value={formatTime(ride.acceptedAt)} />
+              <InfoRow label="Pickup done" value={formatTime(ride.startedAt)} />
+              <InfoRow label="Delivered" value={formatTime(ride.completedAt)} />
+              {paid && (
+                <InfoRow
+                  label={`Payment (${payStage === 'PICKUP' ? 'Pickup' : 'Drop'})`}
+                  value={formatTime(ride.paidAt)}
+                />
+              )}
+            </View>
+          </View>
+
+          {/* Sender / receiver / parcel (parcel and goods orders only) */}
+          {isParcelLike && (
+            <View style={styles.card}>
+              {(!!str(ride.senderName) || !!str(ride.senderPhone)) && (
+                <>
+                  <Text style={styles.cardTitle}>Sender</Text>
+                  <View style={styles.infoBlock}>
+                    <InfoRow label="Name" value={str(ride.senderName) || '-'} />
+                    <InfoRow label="Phone" value={str(ride.senderPhone) || '-'} />
+                  </View>
+                </>
+              )}
+
+              <Text style={[styles.cardTitle, styles.cardTitleGap]}>Receiver</Text>
+              <View style={styles.infoBlock}>
+                <InfoRow label="Name" value={str(ride.receiverName) || '-'} />
+                <InfoRow label="Phone" value={str(ride.receiverPhone) || '-'} />
+              </View>
+
+              <Text style={[styles.cardTitle, styles.cardTitleGap]}>Parcel</Text>
+              <View style={styles.infoBlock}>
+                {!!str(ride.parcelSize) && (
+                  <InfoRow label="Size" value={prettyText(ride.parcelSize)} />
+                )}
+                {!!str(ride.parcelWeight) && (
+                  <InfoRow label="Weight" value={`${str(ride.parcelWeight)} kg`} />
+                )}
+                {!!ride.isFragile && <InfoRow label="Fragile" value="Yes" />}
+                <InfoRow label="Description" value={str(ride.parcelDescription) || '-'} />
+              </View>
+            </View>
+          )}
 
           <View style={styles.card}>
             {alreadyRated ? (
               <Text style={styles.thanks}>Thanks for your feedback!</Text>
             ) : (
               <>
-                <Text style={styles.cardTitle}>How was your ride?</Text>
+                <Text style={styles.cardTitle}>Rate the captain</Text>
                 <View style={styles.starRow}>
                   {[1, 2, 3, 4, 5].map((n) => (
                     <TouchableOpacity key={n} onPress={() => setRating(n)} activeOpacity={0.8}>
@@ -853,6 +1233,7 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
                     </TouchableOpacity>
                   ))}
                 </View>
+                {rating > 0 && <Text style={styles.ratingText}>{RATING_TEXT[rating]}</Text>}
                 <TextInput
                   style={styles.commentInput}
                   placeholder="Share more about your experience (optional)"
@@ -872,18 +1253,21 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
                     <Text style={styles.btnText}>Submit rating</Text>
                   )}
                 </TouchableOpacity>
+                <TouchableOpacity style={styles.skipBtn} onPress={skipRating} disabled={busy}>
+                  <Text style={styles.skipText}>Skip</Text>
+                </TouchableOpacity>
               </>
             )}
           </View>
         </ScrollView>
 
-        <View style={styles.footer}>
-          <TouchableOpacity style={alreadyRated ? styles.btn : styles.btnOutline} onPress={onClose}>
-            <Text style={alreadyRated ? styles.btnText : styles.btnOutlineText}>
-              {alreadyRated ? 'Done' : 'Skip'}
-            </Text>
-          </TouchableOpacity>
-        </View>
+        {alreadyRated && (
+          <View style={styles.footer}>
+            <TouchableOpacity style={styles.btn} onPress={onClose}>
+              <Text style={styles.btnText}>Done</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </SafeAreaView>
     );
   }
@@ -893,17 +1277,17 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
   const arrived = status === 'ARRIVED';
   const onTheWay = status === 'ARRIVING';
 
-  // ACCEPTED   -> Captain accepted your ride
+  // ACCEPTED   -> Captain accepted your order
   // ARRIVING   -> Captain is on the way
-  // ARRIVED    -> Captain has arrived (show OTP)
-  // STARTED    -> Trip in progress
+  // ARRIVED    -> Captain has arrived (product -> payment -> OTP)
+  // STARTED    -> Delivery in progress (receiver OTP)
   const headline = started
-    ? 'Trip in progress'
+    ? 'Delivery in progress'
     : arrived
     ? 'Captain has arrived'
     : onTheWay
     ? 'Captain is on the way'
-    : 'Captain accepted your ride';
+    : 'Captain accepted your order';
 
   const pillText = started
     ? 'On trip'
@@ -915,10 +1299,7 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
       : '-- min'
     : 'Accepted';
 
-  // Works whether the backend sends the OTP as a string or a number
-  const otpDigits = (str(ride.otp) || '----').split('');
-
-  log('RENDER main branch', { status, started, arrived, onTheWay, headline, pillText, otpDigits });
+  log('RENDER main branch', { status, started, arrived, onTheWay, headline, pillText });
 
   return (
     <SafeAreaView
@@ -982,8 +1363,20 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
               <Text style={styles.statusTitle} numberOfLines={1}>
                 {headline}
               </Text>
-              <View style={[styles.etaPill, arrived && styles.etaPillGreen]}>
-                <Text style={[styles.etaPillText, arrived && styles.etaPillTextGreen]}>
+              <View
+                style={[
+                  styles.etaPill,
+                  arrived && styles.etaPillGreen,
+                  onTheWay && styles.etaPillBlue,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.etaPillText,
+                    arrived && styles.etaPillTextGreen,
+                    onTheWay && styles.etaPillTextWhite,
+                  ]}
+                >
                   {pillText}
                 </Text>
               </View>
@@ -995,49 +1388,37 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
               style={styles.flex}
               contentContainerStyle={styles.sheetScroll}
               showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
               onLayout={(e) => log('LAYOUT scrollview', e.nativeEvent.layout)}
               onContentSizeChange={(w, h) => log('SCROLL content size', { w, h })}
             >
-              {/* OTP: only after the captain has arrived at pickup */}
-              {arrived && (
-                <View style={[styles.otpPanel, styles.otpPanelGreen]}>
-                  <View style={styles.otpHead}>
-                    <Text style={styles.otpPanelTitle}>Captain has arrived. Share this OTP</Text>
-                  </View>
-                  <View style={styles.otpDigitsRow}>
-                    {otpDigits.map((d, i) => (
-                      <View key={i} style={styles.otpDigitBox}>
-                        <Text style={styles.otpDigit}>{d}</Text>
-                      </View>
-                    ))}
-                  </View>
-                  <Text style={styles.otpPanelHint}>
-                    Your ride starts once the captain enters this OTP.
-                  </Text>
-                </View>
+              {/* Captain on the way: highlighted */}
+              {onTheWay && (
+                <OnTheWayBanner
+                  eta={ride.captainEtaMinutes}
+                  name={str(ride.captain?.name) || 'Captain'}
+                />
               )}
+
+              {/* Captain arrived: give product -> pickup payment -> OTP */}
+          {arrived && (
+  <PickupSteps
+    ride={ride}
+    productGiven={productGiven}
+    onProductGiven={() => setProductGiven(true)}
+  />
+)}
+
+              {/* Trip started: receiver OTP (different look from the pickup OTP) */}
+              {started && !!str(ride.deliveryOtp) && <ReceiverOtpPanel ride={ride} />}
+
+              {/* PickupSteps already shows the payment status while ARRIVED */}
+              {!arrived && <PayNowCard ride={ride} />}
 
               <CaptainCard ride={ride} />
               <TripDetails ride={ride} onCancelPress={!started ? onCancel : undefined} />
             </ScrollView>
           </SheetBoundary>
-
-          {/* Bottom action: only while the trip is in progress */}
-          {started && (
-            <View style={styles.footer} onLayout={(e) => log('LAYOUT footer', e.nativeEvent.layout)}>
-              <TouchableOpacity
-                style={[styles.btn, busy && styles.btnDisabled]}
-                onPress={askReached}
-                disabled={busy}
-              >
-                {busy ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.btnText}>I have reached my destination</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-          )}
         </View>
       </View>
     </SafeAreaView>
@@ -1078,12 +1459,51 @@ const styles = StyleSheet.create({
 
   card: { backgroundColor: '#fff', borderRadius: 16, padding: 14, marginBottom: 12 },
   cardTitle: { fontSize: 15, fontWeight: '800', color: BLACK, marginBottom: 10 },
+  cardTitleGap: { marginTop: 16 },
   cardEyebrow: {
     fontSize: 10.5,
     fontWeight: '700',
     color: GREY,
     letterSpacing: 0.8,
     marginBottom: 10,
+  },
+
+  // payment card (active order)
+  payNowCard: { borderWidth: 1.5, borderColor: BLUE_LIGHT },
+  payNowCardDone: { borderColor: GREEN, backgroundColor: '#F0FDF4' },
+  avatarDone: { backgroundColor: GREEN_LIGHT },
+
+  // paid-at badge + info rows
+  stageBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: GREEN_LIGHT,
+    borderRadius: 999,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    marginTop: 10,
+  },
+  stageBadgeText: { color: GREEN, fontSize: 12.5, fontWeight: '800' },
+  infoBlock: {
+    backgroundColor: BG,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  infoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    paddingVertical: 7,
+  },
+  infoLabel: { fontSize: 13, color: GREY, marginRight: 12 },
+  infoValue: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: 13,
+    fontWeight: '700',
+    color: BLACK,
   },
 
   // captain
@@ -1093,7 +1513,7 @@ const styles = StyleSheet.create({
   avatarFallback: { alignItems: 'center', justifyContent: 'center', backgroundColor: BLUE_LIGHT },
   avatarLetter: { fontSize: 20, fontWeight: '800', color: BLUE },
   captainName: { fontSize: 16, fontWeight: '800', color: BLACK },
-  captainSub: { fontSize: 12.5, color: GREY, marginTop: 2 },
+  captainSub: { fontSize: 12.5, color: GREY, marginTop: 2, lineHeight: 18 },
   phoneRow: { flexDirection: 'row', alignItems: 'center', marginTop: 3 },
   captainPhone: { fontSize: 13, color: GREY, fontWeight: '600', marginLeft: 5 },
   callBtn: {
@@ -1158,15 +1578,24 @@ const styles = StyleSheet.create({
   stat: { flex: 1 },
   statValue: { fontSize: 15, fontWeight: '700', color: BLACK, marginTop: 2 },
 
-  // trip details: header, vehicle row, 3-dot menu
+  // trip details: dropdown header, body, vehicle row, 3-dot menu
   cardHeadRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 12,
   },
+  tripHeadTap: { flexDirection: 'row', alignItems: 'center', paddingVertical: 2 },
+  tripSummary: { fontSize: 12, color: GREY, marginTop: 2 },
+  tripBody: { marginTop: 12 },
   noMargin: { marginBottom: 0 },
-  menuBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', marginRight: -6 },
+  menuBtn: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 6,
+    marginRight: -6,
+  },
   vehicleRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1246,6 +1675,37 @@ const styles = StyleSheet.create({
 
   // completed
   successWrap: { alignItems: 'center', marginVertical: 16 },
+  successCard: {
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    paddingVertical: 24,
+    paddingHorizontal: 16,
+    marginBottom: 12,
+  },
+  tickCircle: {
+    width: 84,
+    height: 84,
+    borderRadius: 42,
+    backgroundColor: GREEN,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tick: { color: '#fff', fontSize: 48, fontWeight: '800', marginTop: -4 },
+  successTitle: { fontSize: 20, fontWeight: '800', color: GREEN, marginTop: 14 },
+  successAmount: { fontSize: 34, fontWeight: '800', color: BLACK, marginTop: 4 },
+  successSub: { fontSize: 14, color: GREY, marginTop: 4 },
+  successTime: { fontSize: 12.5, color: GREY, marginTop: 8 },
+  stageBadgeCenter: { alignSelf: 'center', marginTop: 12 },
+  ratingText: {
+    textAlign: 'center',
+    fontSize: 14,
+    fontWeight: '700',
+    color: BLACK,
+    marginBottom: 10,
+  },
+  skipBtn: { paddingVertical: 12, alignItems: 'center', marginTop: 4 },
+  skipText: { color: GREY, fontSize: 14, fontWeight: '700' },
   bigCircle: { width: 84, height: 84, borderRadius: 42, alignItems: 'center', justifyContent: 'center' },
   fareBig: { fontSize: 32, fontWeight: '800', color: BLACK, marginTop: 4 },
 
@@ -1301,34 +1761,161 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   etaPillGreen: { backgroundColor: GREEN_LIGHT },
+  etaPillBlue: { backgroundColor: BLUE },
   etaPillText: { fontSize: 13.5, fontWeight: '800', color: BLUE },
   etaPillTextGreen: { color: GREEN },
+  etaPillTextWhite: { color: '#fff' },
 
-  // OTP (compact)
-  otpPanel: {
+  // captain on the way banner
+  onWayBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: BLUE,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 12,
+  },
+  onWayDotWrap: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center', marginRight: 12 },
+  onWayRing: { position: 'absolute', width: 22, height: 22, borderRadius: 11, backgroundColor: '#fff' },
+  onWayDot: { width: 14, height: 14, borderRadius: 7, backgroundColor: '#fff' },
+  onWayTitle: { fontSize: 16, fontWeight: '800', color: '#fff' },
+  onWaySub: { fontSize: 12, color: '#DBEAFE', marginTop: 2 },
+  onWayEta: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    alignItems: 'center',
+    marginLeft: 10,
+  },
+  onWayEtaValue: { fontSize: 20, fontWeight: '800', color: BLUE },
+  onWayEtaUnit: { fontSize: 10.5, fontWeight: '700', color: GREY },
+
+  // pickup steps (ARRIVED)
+  stepsPanel: {
     backgroundColor: '#fff',
     borderRadius: 16,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
+    padding: 14,
     marginBottom: 12,
+    borderWidth: 1.5,
+    borderColor: GREEN,
+  },
+  stepRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
+  stepDot: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: BG,
+    borderWidth: 1.5,
+    borderColor: BORDER,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  stepDotDone: { backgroundColor: GREEN, borderColor: GREEN },
+  stepDotCurrent: { backgroundColor: BLUE, borderColor: BLUE },
+  stepDotLater: { backgroundColor: BLUE_LIGHT, borderColor: BLUE_LIGHT },
+  stepDotText: { fontSize: 12, fontWeight: '800', color: GREY },
+  stepTitle: { fontSize: 14.5, fontWeight: '800', color: BLACK },
+  stepTitleLocked: { color: '#94A3B8' },
+  stepSub: { fontSize: 12, color: GREY, marginTop: 2 },
+  stepBody: { marginTop: 6, marginBottom: 10 },
+  stepBtn: { marginTop: 10, height: 46 },
+  payBox: { backgroundColor: BG, borderRadius: 12, alignItems: 'center', paddingVertical: 12 },
+  payBoxLabel: { fontSize: 12, fontWeight: '700', color: GREY },
+  payBoxAmount: { fontSize: 28, fontWeight: '800', color: BLACK, marginTop: 2 },
+  waitRow: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
+  waitText: { flex: 1, marginLeft: 10, fontSize: 12, color: GREY, lineHeight: 17 },
+  linkText: { fontSize: 12, fontWeight: '700', color: BLUE, marginTop: 10, textAlign: 'center' },
+
+  // receiver OTP (violet, clearly different from the pickup OTP)
+  rcvPanel: {
+    backgroundColor: '#F5F3FF',
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: VIOLET,
+    padding: 14,
+    marginBottom: 12,
+  },
+  rcvBadge: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: VIOLET,
+    borderRadius: 999,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+  },
+  rcvBadgeText: { color: '#fff', fontSize: 11, fontWeight: '800', letterSpacing: 0.6, marginLeft: 5 },
+  rcvTitle: { fontSize: 15, fontWeight: '800', color: BLACK, marginTop: 10 },
+  rcvWho: { fontSize: 12.5, color: GREY, marginTop: 2 },
+  rcvDigitsRow: { flexDirection: 'row', justifyContent: 'center', marginVertical: 12 },
+  rcvDigitBox: {
+    width: 48,
+    height: 56,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    borderWidth: 2,
+    borderColor: VIOLET,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 5,
+  },
+  rcvDigit: { fontSize: 28, fontWeight: '800', color: VIOLET },
+  rcvNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: VIOLET_LIGHT,
+    borderRadius: 10,
+    padding: 8,
+  },
+  rcvNoteText: { flex: 1, marginLeft: 6, fontSize: 11.5, fontWeight: '600', color: '#5B21B6' },
+
+  // OTP (extra compact)
+  otpPanel: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginBottom: 10,
     borderWidth: 1.5,
     borderColor: BORDER,
   },
   otpPanelGreen: { borderColor: GREEN, backgroundColor: '#F0FDF4' },
   otpHead: { alignItems: 'center' },
-  otpPanelTitle: { fontSize: 13.5, fontWeight: '700', color: BLACK, textAlign: 'center' },
-  otpDigitsRow: { flexDirection: 'row', justifyContent: 'center', marginVertical: 10 },
+  otpPanelTitle: { fontSize: 12.5, fontWeight: '700', color: BLACK, textAlign: 'center' },
+  otpDigitsRow: { flexDirection: 'row', justifyContent: 'center', marginVertical: 6 },
   otpDigitBox: {
-    width: 44,
-    height: 50,
-    borderRadius: 11,
+    width: 36,
+    height: 40,
+    borderRadius: 9,
     backgroundColor: BLUE_LIGHT,
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 5,
+    marginHorizontal: 4,
   },
-  otpDigit: { fontSize: 24, fontWeight: '800', color: BLUE },
-  otpPanelHint: { fontSize: 12, color: GREY, textAlign: 'center' },
+  otpDigit: { fontSize: 20, fontWeight: '800', color: BLUE },
+  otpPanelHint: { fontSize: 11, color: GREY, textAlign: 'center' },
+
+  // OTP safety note (photo / video before handing over the product)
+  otpNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    borderRadius: 10,
+    paddingVertical: 5,
+    paddingHorizontal: 9,
+    marginTop: 6,
+  },
+  otpNoteText: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#92400E',
+    marginLeft: 6,
+  },
 
   // buttons
   footer: { padding: 16, backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: BORDER },

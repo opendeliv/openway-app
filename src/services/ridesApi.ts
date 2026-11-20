@@ -13,6 +13,7 @@ export type RideStatus =
   | 'REQUESTED'
   | 'ACCEPTED'
   | 'ARRIVING'
+  | 'ARRIVED'
   | 'STARTED'
   | 'COMPLETED'
   | 'CANCELLED';
@@ -41,6 +42,7 @@ export type Ride = {
   status: RideStatus;
   paymentStatus: PaymentStatus;
   paymentMethod?: 'CASH' | 'UPI' | null;
+  payAt?: string;
 
   fare: number | null;
   distance: number | null;
@@ -54,6 +56,7 @@ export type Ride = {
   parcelDescription: string | null;
 
   acceptedAt: string | null;
+  arrivedAt?: string | null;
   startedAt: string | null;
   completedAt: string | null;
   cancelledAt: string | null;
@@ -62,7 +65,10 @@ export type Ride = {
   updatedAt: string;
 
   // tracking screen ke liye (backend getRideById se aate hain)
+  // Pickup OTP: captain ko parcel dete waqt (ACCEPTED / ARRIVING / ARRIVED)
   otp?: string | null;
+  // Delivery OTP: PARCEL / GOODS, sirf ride STARTED hone par aata hai
+  deliveryOtp?: string | null;
   captainRating?: number | null;
   captain?: {
     name?: string | null;
@@ -91,6 +97,9 @@ export type CreateRideInput = {
   fare?: number;
   distance?: number;
   duration?: number;
+
+  // payment kahan hogi
+  payAt?: 'PICKUP' | 'DROP';
 
   // sender backend khud profile se bharta hai (optional override)
   senderName?: string;
@@ -132,7 +141,7 @@ export const ridesApi = {
   cancelRide: (id: string) =>
     api.patch<Ride>(`/rides/${id}/cancel`).then((response) => response.data),
 
-  /* PATCH /rides/:id/confirm-arrival  (user bolta hai destination aa gaya) */
+  /* PATCH /rides/:id/confirm-arrival  (sirf CAB / BIKE, parcel/goods me backend block karta hai) */
   confirmArrival: (id: string) =>
     api
       .patch<Ride>(`/rides/${id}/confirm-arrival`)

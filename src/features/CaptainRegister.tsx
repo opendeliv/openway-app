@@ -32,6 +32,8 @@ import {
   VehicleType,
 } from '../services/captainsApi';
 import { captainDocumentsApi } from '../services/Captaindocumentsapi';
+// path apni icons file ke hisaab se badal lena (jisme VEHICLE_ICONS export hai)
+import { VEHICLE_ICONS } from '../constants/vehicleIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Live photo is taken in step 1. Step 3 documents: Aadhaar, PAN, Driving License, Vehicle RC
@@ -61,44 +63,34 @@ const STEPS = [
   { n: 2, label: 'Vehicle' },
   { n: 3, label: 'Documents' },
 ];
-
 const VEHICLE_OPTIONS: {
   id: VehicleType;
   label: string;
-  emoji: string;
+  icon: string; // key of VEHICLE_ICONS
 }[] = [
-  { id: 'WALK', label: 'Walk', emoji: '🚶' },
-  { id: 'CYCLE', label: 'Cycle', emoji: '🚲' },
-  { id: 'BIKE', label: 'Bike', emoji: '🏍️' },
-  { id: 'AUTO', label: 'Auto', emoji: '🛺' },
-  { id: 'CAB', label: 'Cab', emoji: '🚕' },
-  { id: 'GOODS_VEHICLE', label: 'Truck', emoji: '🚚' },
+  { id: 'WALK', label: 'Walk', icon: 'walk' },
+  { id: 'CYCLE', label: 'Cycle', icon: 'cycle' },
+  { id: 'BIKE', label: 'Bike', icon: 'bike' },
+  { id: 'AUTO', label: 'Auto', icon: 'auto' },
+  { id: 'GOODS_VEHICLE', label: 'Goods', icon: 'ace' },
 ];
 
-// Types shown after a vehicle is selected (ids match backend vehicle type ids)
-const SUB_TYPES: Partial<Record<VehicleType, { id: string; label: string }[]>> = {
+const SUB_TYPES: Partial<
+  Record<VehicleType, { id: string; label: string; icon: string }[]>
+> = {
   BIKE: [
-    { id: 'lite', label: 'Lite Bike' },
-    { id: 'bike', label: 'Super Bike' },
-    { id: 'scooty', label: 'Scooty' },
-  ],
-  CAB: [
-    { id: 'mini_van', label: 'Mini Van' },
-    { id: 'suv', label: 'SUV' },
-    { id: 'utility_van', label: 'Utility Van' },
+    { id: 'bike', label: 'Bike', icon: 'bike' },
+    { id: 'scooty', label: 'Scooty', icon: 'scooty' },
   ],
   AUTO: [
-    { id: 'auto', label: 'Auto' },
-    { id: 'e_rickshaw', label: 'E-Auto' },
+    { id: 'auto', label: 'Auto', icon: 'auto' },
+    { id: 'e_rickshaw', label: 'E-Auto', icon: 'eauto' },
   ],
   GOODS_VEHICLE: [
-    { id: 'tata_ace', label: 'Tata Ace' },
-    { id: 'eicher', label: 'Eicher' },
-    { id: 'pickup', label: 'Pickup' },
-    { id: 'mahindra_furio', label: 'Mahindra Furio' },
+    { id: 'tata_ace', label: 'Tata Ace', icon: 'ace' },
+    { id: 'pickup', label: 'Pickup', icon: 'pickup' },
   ],
 };
-
 /* =========================================================
    DOCUMENT CONFIG
    (keep in sync with backend DOCUMENTS_BY_VEHICLE)
@@ -1197,7 +1189,13 @@ export default function CaptainRegisterScreen() {
                         activeOpacity={0.85}
                         onPress={() => onSelectVehicle(v.id)}
                       >
-                        <Text style={styles.chipEmoji}>{v.emoji}</Text>
+                        {!!VEHICLE_ICONS[v.icon] && (
+  <Image
+    source={VEHICLE_ICONS[v.icon]!}
+    style={styles.chipImg}
+    resizeMode="contain"
+  />
+)}
                         <Text style={[styles.chipText, selected && styles.chipTextOn]}>
                           {v.label}
                         </Text>
@@ -1453,23 +1451,25 @@ const styles = StyleSheet.create({
   phoneValue: { flex: 1, fontSize: 15, color: GREY },
   verified: { fontSize: 12, fontWeight: '700', color: GREEN },
   error: { fontSize: 12, color: RED, marginTop: 6 },
-
+chipImg: { width: 74, height: 74, marginBottom: 4 },
+subChipImg: { width: 28, height: 28, marginLeft: 8 },
   // vehicle chips
-  chipsWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-  },
-  chip: {
-    width: '31%',
-    alignItems: 'center',
-    paddingVertical: 12,
-    marginBottom: 10,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: BORDER,
-    backgroundColor: BG,
-  },
+ chipsWrap: {
+  flexDirection: 'row',
+  flexWrap: 'wrap',
+  justifyContent: 'center', // was: 'space-between'
+},
+chip: {
+  width: '30%',            // was: '31%'
+  marginHorizontal: '1.5%', // new
+  alignItems: 'center',
+  paddingVertical: 12,
+  marginBottom: 10,
+  borderRadius: 14,
+  borderWidth: 1.5,
+  borderColor: BORDER,
+  backgroundColor: BG,
+},
   chipOn: { borderColor: BLUE, backgroundColor: BLUE_LIGHT },
   chipEmoji: { fontSize: 26, marginBottom: 4 },
   chipText: { fontSize: 12.5, fontWeight: '700', color: GREY },

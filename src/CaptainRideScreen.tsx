@@ -16,6 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import Geolocation from '@react-native-community/geolocation';
+import Ionicons from 'react-native-vector-icons/Ionicons';
 
 // Same api as the Home screen (with token)
 import api from './services/CaptainaRideApi';
@@ -27,10 +28,11 @@ const BLACK = '#0F172A';
 const GREY = '#64748B';
 const BORDER = '#E2E8F0';
 const GREEN = '#16A34A';
+const GREEN_LIGHT = '#F0FDF4';
 const RED = '#DC2626';
-
-// If farther than this (meters) from the drop, the complete alert shows a warning
-const DROP_NEAR_METERS = 300;
+const AMBER_BG = '#FEF3C7';
+const AMBER_BORDER = '#FDE68A';
+const AMBER_TEXT = '#92400E';
 
 type Coords = { latitude: number; longitude: number };
 
@@ -56,33 +58,33 @@ type RouteInfo = {
   durationMinutes: number;
 };
 
-// Flow: accepted -> go to pickup -> reached pickup -> OTP -> trip to drop -> complete
-// (same wording as the Home screen)
+// Flow: accepted -> go to pickup -> reached pickup -> pickup OTP (from sender)
+//       -> delivery in progress -> receiver OTP -> delivered (payment popup on Home)
+// The last step (STARTED -> COMPLETED) is done with the receiver OTP section, not a button.
 const NEXT_ACTION: Partial<
   Record<CaptainRideStatus, { next: CaptainRideStatus; label: string }>
 > = {
   ACCEPTED: { next: 'ARRIVING', label: "Let's Go for Pickup" },
   ARRIVING: { next: 'ARRIVED', label: "I've Reached Pickup" },
-  ARRIVED: { next: 'STARTED', label: 'Enter OTP' },
-  STARTED: { next: 'COMPLETED', label: 'Complete Ride' },
+  ARRIVED: { next: 'STARTED', label: 'Enter Pickup OTP' },
 };
 
 const STATUS_LABEL: Record<CaptainRideStatus, string> = {
-  ASSIGNED: 'New ride assigned',
-  ACCEPTED: 'Ride accepted',
+  ASSIGNED: 'New order assigned',
+  ACCEPTED: 'Order accepted',
   ARRIVING: 'On the way to pickup',
   ARRIVED: 'Reached pickup',
-  STARTED: 'On the way to drop',
-  COMPLETED: 'Completed',
+  STARTED: 'Delivery in progress',
+  COMPLETED: 'Delivered',
   CANCELLED: 'Cancelled',
 };
 
 const CATEGORY_LABEL: Record<string, string> = {
-  CAB: 'Cab',
-  BIKE: 'Bike Ride',
-  PARCEL: 'Parcel',
-  GOODS: 'Goods',
+  PARCEL: 'Parcel Delivery',
+  GOODS: 'Goods Delivery',
 };
+
+const PHOTO_NOTE = 'Take a photo / video of the parcel before you take it from the sender.';
 
 /* ---------- helpers ---------- */
 
@@ -150,20 +152,6 @@ const toCoords = (lat: any, lng: any): Coords | null => {
   return { latitude, longitude };
 };
 
-// Distance between two coordinates (meters)
-const distanceM = (a: Coords, b: Coords) => {
-  const R = 6371000;
-  const toRad = (x: number) => (x * Math.PI) / 180;
-  const dLat = toRad(b.latitude - a.latitude);
-  const dLng = toRad(b.longitude - a.longitude);
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(a.latitude)) *
-      Math.cos(toRad(b.latitude)) *
-      Math.sin(dLng / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
-};
-
 const callNumber = (phone?: string | null) => {
   if (!phone) return;
   Linking.openURL(`tel:${phone}`).catch(() =>
@@ -178,6 +166,42 @@ const openNavigation = (to: Coords | null) => {
     `https://www.google.com/maps/dir/?api=1&destination=${to.latitude},${to.longitude}&travelmode=driving`,
   ).catch(() => Alert.alert('Navigation', 'Could not open Google Maps'));
 };
+
+// One contact row: label + name + phone on the left, Call button on the right
+const ContactRow = ({
+  icon,
+  label,
+  name,
+  phone,
+}: {
+  icon: string;
+  label: string;
+  name?: string | null;
+  phone?: string | null;
+}) => (
+  <View style={styles.contactRow}>
+    <View style={styles.contactIcon}>
+      <Ionicons name={icon} size={16} color={BLUE} />
+    </View>
+    <View style={styles.flex}>
+      <Text style={styles.boxTitle}>{label}</Text>
+      <Text style={styles.boxText} numberOfLines={1}>
+        {name || '-'}
+      </Text>
+      {!!phone && <Text style={styles.boxSub}>{phone}</Text>}
+    </View>
+    {!!phone && (
+      <TouchableOpacity
+        style={styles.callBtn}
+        activeOpacity={0.8}
+        onPress={() => callNumber(phone)}
+      >
+        <Ionicons name="call" size={14} color="#fff" />
+        <Text style={styles.callText}>Call</Text>
+      </TouchableOpacity>
+    )}
+  </View>
+);
 
 export default function CaptainRideScreen() {
   const navigation = useNavigation<any>();
@@ -195,9 +219,12 @@ export default function CaptainRideScreen() {
   const [cancelVisible, setCancelVisible] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
 
-  // Start OTP (the customer tells the 4 digit OTP)
+  // Pickup OTP (the sender tells the 4 digit OTP)
   const [otpVisible, setOtpVisible] = useState(false);
   const [otpValue, setOtpValue] = useState('');
+
+  // Receiver OTP (the receiver tells the 4 digit OTP when the order is handed over)
+  const [receiverOtp, setReceiverOtp] = useState('');
 
   const mapRef = useRef<MapView>(null);
   const closedRef = useRef(false);
@@ -208,20 +235,18 @@ export default function CaptainRideScreen() {
   const pickup = toCoords(ride.pickupLatitude, ride.pickupLongitude);
   const drop = toCoords(ride.dropLatitude, ride.dropLongitude);
 
-  // Before the trip starts (accepted / heading to pickup / reached pickup): only the pickup point.
-  // After the trip starts: only the drop.
+  // Before the trip starts: only the pickup point. After pickup OTP: only the drop.
   const started = status === 'STARTED';
   const atPickup = status === 'ARRIVED';
   const target = started ? drop : pickup;
   const targetAddress = started ? ride.dropAddress : ride.pickupAddress;
 
   const category: string = ride.category ?? '';
-  const isParcelLike = category === 'PARCEL' || category === 'GOODS';
   const hasSender = !!ride.senderName || !!ride.senderPhone;
 
-  // Passenger details (shown if the backend sends the user with the ride)
-  const riderName = ride.user?.name ?? ride.userName ?? ride.passengerName ?? ride.riderName;
-  const riderPhone = ride.user?.phone ?? ride.userPhone ?? ride.passengerPhone ?? ride.riderPhone;
+  // Bike-type parcel vehicles use two-wheeler routes
+  const vehicleType: string = String(ride.vehicleType ?? '').toLowerCase();
+  const twoWheeler = ['bike', 'lite', 'scooty'].includes(vehicleType);
 
   const goBack = useCallback(() => {
     if (closedRef.current) return;
@@ -247,7 +272,7 @@ export default function CaptainRideScreen() {
     return () => clearInterval(t);
   }, [fetchRide]);
 
-  // Ride finished or cancelled: leave this screen
+  // Delivered or cancelled: leave this screen (Home opens the payment popup)
   useEffect(() => {
     if (!data || closedRef.current) return;
 
@@ -258,7 +283,7 @@ export default function CaptainRideScreen() {
 
     if (data.status === 'CANCELLED' || data.ride?.status === 'CANCELLED') {
       if (data.ride?.cancelledBy === 'USER') {
-        Alert.alert('Ride cancelled', 'The customer cancelled this ride');
+        Alert.alert('Order cancelled', 'The customer cancelled this order');
       }
       goBack();
     }
@@ -302,7 +327,7 @@ export default function CaptainRideScreen() {
         }>('/maps/route', {
           pickup: from,
           drop: target,
-          travelMode: category === 'BIKE' ? 'TWO_WHEELER' : 'DRIVE',
+          travelMode: twoWheeler ? 'TWO_WHEELER' : 'DRIVE',
         });
 
         if (!alive) return;
@@ -352,6 +377,7 @@ export default function CaptainRideScreen() {
   }, [status, hasPos, routeInfo, targetKey]);
 
   /* ---------- actions ---------- */
+  // otp is the pickup OTP for STARTED, and the receiver OTP for COMPLETED
   const updateStatus = async (
     next: CaptainRideStatus,
     cancellationReason?: string,
@@ -397,27 +423,8 @@ export default function CaptainRideScreen() {
     }
   };
 
-  // Before completing, confirm the captain reached the drop location
-  const onCompletePress = () => {
-    const far = myPos && drop ? distanceM(myPos, drop) : null;
-    const message =
-      far != null && far > DROP_NEAR_METERS
-        ? `You are about ${Math.round(far)} m away from the drop location.\nDo you still want to complete the ride?`
-        : "Have you reached the customer's drop location?";
-
-    Alert.alert('Drop location check', message, [
-      { text: 'No', style: 'cancel' },
-      { text: 'Yes, Complete', onPress: () => updateStatus('COMPLETED') },
-    ]);
-  };
-
   const onNextActionPress = (next: CaptainRideStatus) => {
-    if (next === 'COMPLETED') {
-      onCompletePress();
-      return;
-    }
-
-    // Starting the trip needs the OTP from the customer
+    // Starting the trip needs the pickup OTP from the sender
     if (next === 'STARTED') {
       setOtpValue('');
       setOtpVisible(true);
@@ -429,7 +436,7 @@ export default function CaptainRideScreen() {
 
   const onConfirmOtp = async () => {
     if (otpValue.length !== 4) {
-      Alert.alert('OTP required', "Enter the 4-digit OTP shown on the customer's phone");
+      Alert.alert('OTP required', "Enter the 4-digit OTP shown on the sender's phone");
       return;
     }
 
@@ -438,6 +445,16 @@ export default function CaptainRideScreen() {
       setOtpVisible(false);
       setOtpValue('');
     }
+  };
+
+  // Receiver gave the OTP: verify it and finish the delivery
+  const onVerifyReceiverOtp = async () => {
+    if (receiverOtp.length !== 4) {
+      Alert.alert('OTP required', "Enter the 4-digit OTP shown on the receiver's phone");
+      return;
+    }
+
+    await updateStatus('COMPLETED', undefined, receiverOtp);
   };
 
   const onConfirmCancel = async () => {
@@ -466,7 +483,7 @@ export default function CaptainRideScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top']}>
         <View style={styles.center}>
-          <Text style={styles.muted}>Could not load the ride</Text>
+          <Text style={styles.muted}>Could not load the order</Text>
           <TouchableOpacity style={styles.retryBtn} onPress={fetchRide}>
             <Text style={styles.retryText}>Try again</Text>
           </TouchableOpacity>
@@ -483,7 +500,7 @@ export default function CaptainRideScreen() {
     ? 'DROP LOCATION'
     : atPickup
       ? "YOU'VE REACHED PICKUP"
-      : 'PICK UP THE CUSTOMER FROM HERE';
+      : 'PICK UP THE PARCEL FROM HERE';
 
   // Google Maps navigation is useful only while moving
   const showNav = status === 'ACCEPTED' || status === 'ARRIVING' || started;
@@ -510,7 +527,7 @@ export default function CaptainRideScreen() {
             {!started && pickup && (
               <Marker
                 coordinate={pickup}
-                title="Customer Pickup"
+                title="Pickup"
                 description={ride.pickupAddress}
                 pinColor={GREEN}
               />
@@ -555,13 +572,14 @@ export default function CaptainRideScreen() {
 
       {/* Bottom card */}
       <View style={styles.sheet}>
-        <ScrollView showsVerticalScrollIndicator={false} bounces={false}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          bounces={false}
+          keyboardShouldPersistTaps="handled"
+        >
           <View style={styles.rowBetween}>
             <View style={styles.flex}>
-              <Text style={styles.title}>{CATEGORY_LABEL[category] ?? 'Ride'}</Text>
-              {!!ride.vehicleType && (
-                <Text style={styles.vehicle}>{prettyLabel(ride.vehicleType)}</Text>
-              )}
+              <Text style={styles.title}>{CATEGORY_LABEL[category] ?? 'Delivery'}</Text>
             </View>
             <View style={styles.badge}>
               <Text style={styles.badgeText}>
@@ -570,11 +588,12 @@ export default function CaptainRideScreen() {
             </View>
           </View>
 
-          {/* At pickup: remind the captain to ask for the OTP */}
+          {/* At pickup: photo / video note + ask for the OTP */}
           {atPickup && (
-            <View style={styles.otpNotice}>
-              <Text style={styles.otpNoticeText}>
-                Ask the customer for the 4-digit OTP, then start the trip to the drop location.
+            <View style={styles.noteBox}>
+              <Ionicons name="camera-outline" size={18} color={AMBER_TEXT} />
+              <Text style={styles.noteText}>
+                {PHOTO_NOTE} Then ask the sender for the 4-digit pickup OTP.
               </Text>
             </View>
           )}
@@ -583,6 +602,41 @@ export default function CaptainRideScreen() {
             <Text style={styles.eta}>
               {started ? 'Drop' : 'Pickup'}: {routeInfo.distanceKm.toFixed(1)} km  •  {routeInfo.durationMinutes} min
             </Text>
+          )}
+
+          {/* Receiver OTP: while the delivery is in progress */}
+          {started && (
+            <View style={styles.recvPanel}>
+              <Text style={styles.recvTitle}>Receiver OTP</Text>
+              <Text style={styles.recvHint}>
+                Hand over the order to the receiver, then ask for the 4-digit OTP shown on their
+                phone.
+              </Text>
+              <TextInput
+                style={styles.otpInput}
+                placeholder="----"
+                placeholderTextColor={GREY}
+                value={receiverOtp}
+                onChangeText={(t) => setReceiverOtp(t.replace(/\D/g, '').slice(0, 4))}
+                keyboardType="number-pad"
+                maxLength={4}
+              />
+              <TouchableOpacity
+                style={[
+                  styles.primaryBtn,
+                  styles.recvBtn,
+                  (receiverOtp.length !== 4 || updating) && styles.btnDisabled,
+                ]}
+                disabled={receiverOtp.length !== 4 || updating}
+                onPress={onVerifyReceiverOtp}
+              >
+                {updating ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.primaryText}>Verify OTP & Complete Delivery</Text>
+                )}
+              </TouchableOpacity>
+            </View>
           )}
 
           <View style={styles.placeRow}>
@@ -600,56 +654,52 @@ export default function CaptainRideScreen() {
             </View>
           </View>
 
-          {/* Customer / parcel details */}
-          {isParcelLike ? (
-            <View style={styles.box}>
-              {(!!ride.parcelDescription || !!ride.parcelSize) && (
-                <>
-                  <Text style={styles.boxTitle}>Package</Text>
-                  {!!ride.parcelDescription && (
-                    <Text style={styles.boxText}>{ride.parcelDescription}</Text>
-                  )}
-                  {!!ride.parcelSize && (
-                    <Text style={styles.boxSub}>Size: {prettyLabel(ride.parcelSize)}</Text>
-                  )}
-                  <View style={styles.divider} />
-                </>
-              )}
+          {/* Contacts, vehicle / size chips, parcel description at the bottom */}
+          <View style={styles.box}>
+            {hasSender && (
+              <>
+                <ContactRow
+                  icon="send-outline"
+                  label="SENDER (PICKUP)"
+                  name={ride.senderName}
+                  phone={ride.senderPhone}
+                />
+                <View style={styles.divider} />
+              </>
+            )}
 
-              {hasSender && (
-                <>
-                  <Text style={styles.boxTitle}>Sender (pickup contact)</Text>
-                  <Text style={styles.boxText}>{ride.senderName || '-'}</Text>
-                  {!!ride.senderPhone && (
-                    <TouchableOpacity onPress={() => callNumber(ride.senderPhone)}>
-                      <Text style={styles.phone}>Call {ride.senderPhone}</Text>
-                    </TouchableOpacity>
-                  )}
-                  <View style={styles.divider} />
-                </>
-              )}
+            <ContactRow
+              icon="person-outline"
+              label="RECEIVER (DROP)"
+              name={ride.receiverName}
+              phone={ride.receiverPhone}
+            />
 
-              <Text style={styles.boxTitle}>Receiver (drop contact)</Text>
-              <Text style={styles.boxText}>{ride.receiverName || '-'}</Text>
-              {!!ride.receiverPhone && (
-                <TouchableOpacity onPress={() => callNumber(ride.receiverPhone)}>
-                  <Text style={styles.phone}>Call {ride.receiverPhone}</Text>
-                </TouchableOpacity>
+            <View style={styles.divider} />
+
+            <View style={styles.chipRow}>
+              {!!ride.vehicleType && (
+                <View style={styles.chip}>
+                  <Text style={styles.chipText}>{prettyLabel(ride.vehicleType)}</Text>
+                </View>
+              )}
+              {!!ride.parcelSize && (
+                <View style={[styles.chip, styles.chipSoft]}>
+                  <Text style={[styles.chipText, styles.chipTextSoft]}>
+                    {prettyLabel(ride.parcelSize)} size
+                  </Text>
+                </View>
               )}
             </View>
-          ) : (
-            (!!riderName || !!riderPhone) && (
-              <View style={styles.box}>
-                <Text style={styles.boxTitle}>Customer</Text>
-                <Text style={styles.boxText}>{riderName || '-'}</Text>
-                {!!riderPhone && (
-                  <TouchableOpacity onPress={() => callNumber(riderPhone)}>
-                    <Text style={styles.phone}>Call {riderPhone}</Text>
-                  </TouchableOpacity>
-                )}
+
+            <View style={styles.descRow}>
+              <Ionicons name="cube-outline" size={18} color={BLUE} style={styles.descIcon} />
+              <View style={styles.flex}>
+                <Text style={styles.boxTitle}>PARCEL DESCRIPTION</Text>
+                <Text style={styles.boxText}>{ride.parcelDescription || '-'}</Text>
               </View>
-            )
-          )}
+            </View>
+          </View>
 
           <View style={styles.fareRow}>
             <Text style={styles.muted}>Fare</Text>
@@ -682,17 +732,20 @@ export default function CaptainRideScreen() {
             </TouchableOpacity>
           )}
 
-          <TouchableOpacity
-            style={styles.cancelBtn}
-            disabled={updating}
-            onPress={() => setCancelVisible(true)}
-          >
-            <Text style={styles.cancelText}>Cancel Ride</Text>
-          </TouchableOpacity>
+          {/* No cancel once the parcel has been picked up */}
+          {!started && (
+            <TouchableOpacity
+              style={styles.cancelBtn}
+              disabled={updating}
+              onPress={() => setCancelVisible(true)}
+            >
+              <Text style={styles.cancelText}>Cancel Order</Text>
+            </TouchableOpacity>
+          )}
         </ScrollView>
       </View>
 
-      {/* Start OTP */}
+      {/* Pickup OTP */}
       <Modal
         visible={otpVisible}
         transparent
@@ -702,8 +755,14 @@ export default function CaptainRideScreen() {
         <View style={styles.backdrop}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Enter pickup OTP</Text>
+
+            <View style={[styles.noteBox, styles.noteBoxModal]}>
+              <Ionicons name="camera-outline" size={18} color={AMBER_TEXT} />
+              <Text style={styles.noteText}>{PHOTO_NOTE}</Text>
+            </View>
+
             <Text style={styles.otpHint}>
-              Ask the customer for the 4-digit OTP shown on their phone, then start the trip to the drop location.
+              Ask the sender for the 4-digit OTP shown on their phone, then start the delivery.
             </Text>
             <TextInput
               style={styles.otpInput}
@@ -735,9 +794,7 @@ export default function CaptainRideScreen() {
                 {updating ? (
                   <ActivityIndicator color="#fff" />
                 ) : (
-                  <Text style={{ color: '#fff', fontWeight: '800' }}>
-                    Start Trip to Drop
-                  </Text>
+                  <Text style={{ color: '#fff', fontWeight: '800' }}>Start Delivery</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -754,7 +811,7 @@ export default function CaptainRideScreen() {
       >
         <View style={styles.backdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Reason for cancelling the ride</Text>
+            <Text style={styles.modalTitle}>Reason for cancelling the order</Text>
             <TextInput
               style={styles.input}
               placeholder="Write a reason..."
@@ -774,7 +831,7 @@ export default function CaptainRideScreen() {
                 style={[styles.modalBtn, { backgroundColor: RED }]}
                 onPress={onConfirmCancel}
               >
-                <Text style={{ color: '#fff', fontWeight: '800' }}>Cancel Ride</Text>
+                <Text style={{ color: '#fff', fontWeight: '800' }}>Cancel Order</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -829,7 +886,7 @@ const styles = StyleSheet.create({
   bannerText: { fontSize: 13, fontWeight: '700', color: BLACK, marginTop: 2 },
 
   sheet: {
-    maxHeight: '58%',
+    maxHeight: '60%',
     backgroundColor: '#fff',
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
@@ -844,8 +901,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 8,
   },
-  title: { fontSize: 17, fontWeight: '800', color: BLACK },
-  vehicle: { fontSize: 12, color: GREY, marginTop: 2 },
+  title: { fontSize: 18, fontWeight: '800', color: BLACK },
   badge: {
     backgroundColor: BLUE_LIGHT,
     paddingHorizontal: 10,
@@ -856,30 +912,92 @@ const styles = StyleSheet.create({
   badgeText: { color: BLUE, fontSize: 12, fontWeight: '700' },
   eta: { fontSize: 13, fontWeight: '700', color: BLUE, marginBottom: 10 },
 
-  otpNotice: {
-    backgroundColor: BLUE_LIGHT,
+  // photo / video note
+  noteBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: AMBER_BG,
+    borderWidth: 1,
+    borderColor: AMBER_BORDER,
     borderRadius: 12,
-    padding: 12,
+    padding: 10,
     marginBottom: 10,
   },
-  otpNoticeText: { fontSize: 13, fontWeight: '600', color: BLUE, lineHeight: 19 },
+  noteBoxModal: { marginBottom: 12 },
+  noteText: {
+    flex: 1,
+    fontSize: 12.5,
+    fontWeight: '600',
+    color: AMBER_TEXT,
+    lineHeight: 18,
+    marginLeft: 8,
+  },
+
+  // receiver OTP
+  recvPanel: {
+    backgroundColor: GREEN_LIGHT,
+    borderWidth: 1.5,
+    borderColor: GREEN,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 12,
+  },
+  recvTitle: { fontSize: 15, fontWeight: '800', color: BLACK },
+  recvHint: { fontSize: 12.5, color: GREY, lineHeight: 18, marginTop: 4, marginBottom: 10 },
+  recvBtn: { marginTop: 12, backgroundColor: GREEN },
 
   placeRow: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 10 },
   dot: { width: 10, height: 10, borderRadius: 5, marginTop: 5, marginRight: 10 },
   placeLabel: { fontSize: 12, color: GREY },
   placeText: { fontSize: 14, color: BLACK, fontWeight: '600', marginTop: 1 },
 
+  // parcel box
   box: {
-    backgroundColor: BLUE_LIGHT,
-    borderRadius: 12,
+    backgroundColor: BG,
+    borderRadius: 14,
     padding: 12,
     marginBottom: 10,
   },
-  boxTitle: { fontSize: 12, color: GREY, marginBottom: 2 },
-  boxText: { fontSize: 14, fontWeight: '700', color: BLACK },
-  boxSub: { fontSize: 12, color: GREY, marginTop: 3 },
-  phone: { fontSize: 14, fontWeight: '700', color: BLUE, marginTop: 4 },
-  divider: { height: 1, backgroundColor: '#CFE0FA', marginVertical: 10 },
+  boxTitle: { fontSize: 10, fontWeight: '800', color: GREY, letterSpacing: 0.8 },
+  boxText: { fontSize: 14, fontWeight: '700', color: BLACK, marginTop: 2 },
+  boxSub: { fontSize: 12, color: GREY, marginTop: 2 },
+  divider: { height: 1, backgroundColor: BORDER, marginVertical: 10 },
+
+  contactRow: { flexDirection: 'row', alignItems: 'center' },
+  contactIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: BLUE_LIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  callBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: GREEN,
+    borderRadius: 999,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    marginLeft: 8,
+  },
+  callText: { color: '#fff', fontSize: 12, fontWeight: '800', marginLeft: 5 },
+
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 10 },
+  chip: {
+    backgroundColor: BLUE,
+    borderRadius: 999,
+    paddingVertical: 5,
+    paddingHorizontal: 14,
+    marginRight: 8,
+  },
+  chipSoft: { backgroundColor: BLUE_LIGHT },
+  chipText: { fontSize: 12.5, fontWeight: '800', color: '#fff' },
+  chipTextSoft: { color: BLUE },
+
+  descRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  descIcon: { marginRight: 10, marginTop: 2 },
 
   fareRow: {
     flexDirection: 'row',
@@ -937,6 +1055,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 12,
     color: BLACK,
+    backgroundColor: '#fff',
   },
   modalRow: { flexDirection: 'row', marginTop: 14 },
   modalBtn: {

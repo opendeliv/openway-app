@@ -13,7 +13,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import EditProfileScreen from './src/EditProfileScreen';
 import PrivacyPolicyScreen from './src/features/profile/PrivacyPolicyScreen';
-
+import ParcelAddressScreen from './src/ParcelAddressScreen';
 
 import LoginScreen from './src/features/auth/screens/LoginScreen';
 import HomeScreen from './src/features/home/screens/HomeScreen';
@@ -184,6 +184,26 @@ export default function App() {
           <Stack.Screen name="AdminTabs" component={AdminTabs} />
           {/* Admin: captain ki poori detail (tabs ke bahar, full screen) */}
           <Stack.Screen name="CaptainDetail" component={CaptainDetailScreen} />
+          <Stack.Screen name="ParcelAddress">
+  {({ navigation, route }) => (
+    <ParcelAddressScreen
+      service={route.params.service}
+      pickup={route.params.pickup}
+      drop={route.params.drop}
+      onBack={navigation.goBack}
+      onOpenTerms={() => navigation.navigate('PrivacyPolicy')} // jo screen Booking me use kar rahe ho wahi
+      onContinue={({ pickup, drop, receiverName, receiverPhone }) =>
+        navigation.navigate('Booking', {
+          service: route.params.service,
+          pickup,
+          drop,
+          receiverName,
+          receiverPhone,
+        })
+      }
+    />
+  )}
+</Stack.Screen>
         </Stack.Navigator>
       </NavigationContainer>
     </SafeAreaProvider>

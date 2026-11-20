@@ -8,9 +8,11 @@ import {
   Linking,
   Alert,
 } from 'react-native';
+import Ionicons from 'react-native-vector-icons/Ionicons';
 
 const BLUE = '#1F6FE5';
 const BLUE_LIGHT = '#EAF2FF';
+const BG = '#F4F7FB';
 const BLACK = '#0F172A';
 const GREY = '#64748B';
 const BORDER = '#E2E8F0';
@@ -27,7 +29,8 @@ export type CaptainRideStatus =
   | 'COMPLETED'
   | 'CANCELLED';
 
-export type RideCategory = 'CAB' | 'BIKE' | 'PARCEL' | 'GOODS';
+// App is only for Parcel / Goods delivery
+export type RideCategory = 'PARCEL' | 'GOODS';
 
 export type CaptainRide = {
   id: string;
@@ -43,32 +46,30 @@ export type CaptainRide = {
 };
 
 export const CATEGORY_LABEL: Record<RideCategory, string> = {
-  CAB: 'Cab',
-  BIKE: 'Bike Ride',
-  PARCEL: 'Parcel',
-  GOODS: 'Goods',
+  PARCEL: 'Parcel Delivery',
+  GOODS: 'Goods Delivery',
 };
 
 const STATUS_LABEL: Record<CaptainRideStatus, string> = {
-  ASSIGNED: 'New ride assigned',
-  ACCEPTED: 'Ride accepted',
+  ASSIGNED: 'New order assigned',
+  ACCEPTED: 'Order accepted',
   ARRIVING: 'On the way to pickup',
   ARRIVED: 'Reached pickup',
-  STARTED: 'On the way to drop',
-  COMPLETED: 'Completed',
+  STARTED: 'Delivery in progress',
+  COMPLETED: 'Delivered',
   CANCELLED: 'Cancelled',
 };
 
 // Next step button for each status.
-// Shared by the Home screen and the map screen so the wording is always the same.
+// Shared by the Home screen and the tracking screen so the wording is always the same.
 export const NEXT_ACTION: Partial<
   Record<CaptainRideStatus, { next: CaptainRideStatus; label: string }>
 > = {
-  ASSIGNED: { next: 'ACCEPTED', label: 'Accept Ride' },
+  ASSIGNED: { next: 'ACCEPTED', label: 'Accept Order' },
   ACCEPTED: { next: 'ARRIVING', label: "Let's Go for Pickup" },
   ARRIVING: { next: 'ARRIVED', label: "I've Reached Pickup" },
-  ARRIVED: { next: 'STARTED', label: 'Enter OTP' },
-  STARTED: { next: 'COMPLETED', label: 'Complete Ride' },
+  ARRIVED: { next: 'STARTED', label: 'Enter Pickup OTP' },
+  STARTED: { next: 'COMPLETED', label: 'Enter Receiver OTP' },
 };
 
 // ---------- helpers ----------
@@ -95,11 +96,47 @@ const callNumber = (phone?: string | null) => {
   );
 };
 
+// One contact row: label + name on the left, call button on the right
+const ContactRow = ({
+  icon,
+  label,
+  name,
+  phone,
+}: {
+  icon: string;
+  label: string;
+  name?: string | null;
+  phone?: string | null;
+}) => (
+  <View style={styles.contactRow}>
+    <View style={styles.contactIcon}>
+      <Ionicons name={icon} size={16} color={BLUE} />
+    </View>
+    <View style={styles.flex}>
+      <Text style={styles.boxTitle}>{label}</Text>
+      <Text style={styles.boxText} numberOfLines={1}>
+        {name || '-'}
+      </Text>
+      {!!phone && <Text style={styles.boxSub}>{phone}</Text>}
+    </View>
+    {!!phone && (
+      <TouchableOpacity
+        style={styles.callBtn}
+        activeOpacity={0.8}
+        onPress={() => callNumber(phone)}
+      >
+        <Ionicons name="call" size={14} color="#fff" />
+        <Text style={styles.callText}>Call</Text>
+      </TouchableOpacity>
+    )}
+  </View>
+);
+
 // ---------- component ----------
 type Props = {
   ride: CaptainRide;
   updating: boolean;
-  // Label of the next step button (e.g. "Start Ride"). Button is hidden if empty
+  // Label of the next step button. Button is hidden if empty
   nextActionLabel?: string;
   onNextAction: () => void;
   onOpenMap: () => void;
@@ -115,12 +152,10 @@ export default function CaptainRideCard({
   onCancel,
 }: Props) {
   const ride = captainRide.ride;
-    // Trip start hone ke baad cancel nahi, aur complete sirf map screen se (drop ke paas)
+  // After pickup the order cannot be cancelled; delivery completes with the receiver OTP
   const tripStarted = captainRide.status === 'STARTED';
   const category = ride?.category as RideCategory | undefined;
-  const isParcelLike = category === 'PARCEL' || category === 'GOODS';
 
-  const hasPackage = !!ride?.parcelDescription || !!ride?.parcelSize;
   const hasSender = !!ride?.senderName || !!ride?.senderPhone;
 
   const distanceText =
@@ -133,17 +168,15 @@ export default function CaptainRideCard({
       <View style={styles.rideHeader}>
         <View style={styles.flex}>
           <Text style={styles.rideTitle}>
-            {category ? CATEGORY_LABEL[category] : 'Current Ride'}
+            {category ? CATEGORY_LABEL[category] : 'Current Order'}
           </Text>
-          {!!ride?.vehicleType && (
-            <Text style={styles.vehicleText}>{prettyLabel(ride.vehicleType)}</Text>
-          )}
         </View>
         <View style={styles.badge}>
           <Text style={styles.badgeText}>{STATUS_LABEL[captainRide.status]}</Text>
         </View>
       </View>
 
+      {/* Route */}
       <View style={styles.placeRow}>
         <View style={[styles.dot, { backgroundColor: GREEN }]} />
         <View style={styles.flex}>
@@ -158,45 +191,6 @@ export default function CaptainRideCard({
           <Text style={styles.placeText}>{getPlace(ride, 'drop')}</Text>
         </View>
       </View>
-
-      {/* Parcel / goods: package, sender and receiver details */}
-      {isParcelLike && (
-        <View style={styles.parcelBox}>
-          {hasPackage && (
-            <>
-              <Text style={styles.boxTitle}>Package</Text>
-              {!!ride?.parcelDescription && (
-                <Text style={styles.boxText}>{ride.parcelDescription}</Text>
-              )}
-              {!!ride?.parcelSize && (
-                <Text style={styles.boxSub}>Size: {prettyLabel(ride.parcelSize)}</Text>
-              )}
-              <View style={styles.boxDivider} />
-            </>
-          )}
-
-          {hasSender && (
-            <>
-              <Text style={styles.boxTitle}>Sender (pickup contact)</Text>
-              <Text style={styles.boxText}>{ride?.senderName || '-'}</Text>
-              {!!ride?.senderPhone && (
-                <TouchableOpacity onPress={() => callNumber(ride.senderPhone)}>
-                  <Text style={styles.phoneLink}>Call {ride.senderPhone}</Text>
-                </TouchableOpacity>
-              )}
-              <View style={styles.boxDivider} />
-            </>
-          )}
-
-          <Text style={styles.boxTitle}>Receiver (drop contact)</Text>
-          <Text style={styles.boxText}>{ride?.receiverName || '-'}</Text>
-          {!!ride?.receiverPhone && (
-            <TouchableOpacity onPress={() => callNumber(ride.receiverPhone)}>
-              <Text style={styles.phoneLink}>Call {ride.receiverPhone}</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      )}
 
       {/* Distance / duration / fare */}
       <View style={styles.statsRow}>
@@ -214,11 +208,60 @@ export default function CaptainRideCard({
         </View>
       </View>
 
+      {/* Contacts, vehicle / size chips, then the parcel description at the bottom */}
+      <View style={styles.parcelBox}>
+        {hasSender && (
+          <>
+            <ContactRow
+              icon="send-outline"
+              label="SENDER (PICKUP)"
+              name={ride?.senderName}
+              phone={ride?.senderPhone}
+            />
+            <View style={styles.boxDivider} />
+          </>
+        )}
+
+        <ContactRow
+          icon="person-outline"
+          label="RECEIVER (DROP)"
+          name={ride?.receiverName}
+          phone={ride?.receiverPhone}
+        />
+
+        <View style={styles.boxDivider} />
+
+        {/* Chips: vehicle + package size */}
+        <View style={styles.chipRow}>
+          {!!ride?.vehicleType && (
+            <View style={styles.chip}>
+              <Text style={styles.chipText}>{prettyLabel(ride.vehicleType)}</Text>
+            </View>
+          )}
+          {!!ride?.parcelSize && (
+            <View style={[styles.chip, styles.chipSoft]}>
+              <Text style={[styles.chipText, styles.chipTextSoft]}>
+                {prettyLabel(ride.parcelSize)} size
+              </Text>
+            </View>
+          )}
+        </View>
+
+        {/* Description at the very bottom */}
+        <View style={styles.descRow}>
+          <Ionicons name="cube-outline" size={18} color={BLUE} style={styles.descIcon} />
+          <View style={styles.flex}>
+            <Text style={styles.boxTitle}>PARCEL DESCRIPTION</Text>
+            <Text style={styles.boxText}>{ride?.parcelDescription || '-'}</Text>
+          </View>
+        </View>
+      </View>
+
       <TouchableOpacity style={styles.mapBtn} activeOpacity={0.85} onPress={onOpenMap}>
-        <Text style={styles.mapBtnText}>View ride on map</Text>
+        <Text style={styles.mapBtnText}>View order on map</Text>
       </TouchableOpacity>
 
-          {!!nextActionLabel && !tripStarted && (
+      {!!nextActionLabel && !tripStarted && (
         <TouchableOpacity
           style={[styles.primaryBtn, updating && styles.btnDisabled]}
           disabled={updating}
@@ -234,13 +277,14 @@ export default function CaptainRideCard({
 
       {tripStarted && (
         <Text style={styles.tripHint}>
-          Trip chal rahi hai. Drop ke 400 m ke andar map screen par "Complete ride" aayega.
+          Delivery chal rahi hai. Receiver ko order dene par tracking screen me receiver ka OTP
+          daalo.
         </Text>
       )}
 
-           {!tripStarted && (
+      {!tripStarted && (
         <TouchableOpacity style={styles.cancelBtn} disabled={updating} onPress={onCancel}>
-          <Text style={styles.cancelBtnText}>Cancel Ride</Text>
+          <Text style={styles.cancelBtnText}>Cancel Order</Text>
         </TouchableOpacity>
       )}
     </View>
@@ -258,7 +302,6 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   rideTitle: { fontSize: 16, fontWeight: '800', color: BLACK },
-  vehicleText: { fontSize: 12, color: GREY, marginTop: 2 },
   badge: {
     backgroundColor: BLUE_LIGHT,
     paddingHorizontal: 10,
@@ -273,18 +316,6 @@ const styles = StyleSheet.create({
   placeLabel: { fontSize: 12, color: GREY },
   placeText: { fontSize: 14, color: BLACK, fontWeight: '600', marginTop: 1 },
 
-  parcelBox: {
-    backgroundColor: BLUE_LIGHT,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 12,
-  },
-  boxTitle: { fontSize: 12, color: GREY, marginBottom: 2 },
-  boxText: { fontSize: 14, fontWeight: '700', color: BLACK },
-  boxSub: { fontSize: 12, color: GREY, marginTop: 3 },
-  phoneLink: { fontSize: 14, fontWeight: '700', color: BLUE, marginTop: 4 },
-  boxDivider: { height: 1, backgroundColor: '#CFE0FA', marginVertical: 10 },
-
   statsRow: {
     flexDirection: 'row',
     borderTopWidth: 1,
@@ -292,16 +323,65 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     marginBottom: 14,
   },
-    tripHint: {
+  stat: { flex: 1, alignItems: 'center' },
+  statValue: { fontSize: 15, fontWeight: '800', color: BLACK },
+  statLabel: { fontSize: 12, color: GREY, marginTop: 2 },
+
+  // parcel box
+  parcelBox: {
+    backgroundColor: BG,
+    borderRadius: 14,
+    padding: 12,
+    marginBottom: 12,
+  },
+  boxTitle: { fontSize: 10, fontWeight: '800', color: GREY, letterSpacing: 0.8 },
+  boxText: { fontSize: 14, fontWeight: '700', color: BLACK, marginTop: 2 },
+  boxSub: { fontSize: 12, color: GREY, marginTop: 2 },
+  boxDivider: { height: 1, backgroundColor: BORDER, marginVertical: 10 },
+
+  contactRow: { flexDirection: 'row', alignItems: 'center' },
+  contactIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: BLUE_LIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  callBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: GREEN,
+    borderRadius: 999,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    marginLeft: 8,
+  },
+  callText: { color: '#fff', fontSize: 12, fontWeight: '800', marginLeft: 5 },
+
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 10 },
+  chip: {
+    backgroundColor: BLUE,
+    borderRadius: 999,
+    paddingVertical: 5,
+    paddingHorizontal: 14,
+    marginRight: 8,
+  },
+  chipSoft: { backgroundColor: BLUE_LIGHT },
+  chipText: { fontSize: 12.5, fontWeight: '800', color: '#fff' },
+  chipTextSoft: { color: BLUE },
+
+  descRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  descIcon: { marginRight: 10, marginTop: 2 },
+
+  tripHint: {
     fontSize: 12.5,
     color: GREY,
     textAlign: 'center',
     marginTop: 4,
     lineHeight: 18,
   },
-  stat: { flex: 1, alignItems: 'center' },
-  statValue: { fontSize: 15, fontWeight: '800', color: BLACK },
-  statLabel: { fontSize: 12, color: GREY, marginTop: 2 },
 
   mapBtn: {
     backgroundColor: BLUE_LIGHT,
