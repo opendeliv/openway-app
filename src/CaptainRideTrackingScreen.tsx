@@ -796,16 +796,14 @@ export default function CaptainRideTrackingScreen() {
       setDeliveryVerifiedLocal(true);
       setDeliveryOtp('');
       await fetchRide();
-
-      // OTP verify hote hi seedha payment ka alert
-      askPaymentAndFinish(otp);
+      // Ride yahan finish nahi hogi. Captain neeche wale
+      // "Finish ride" / "Collect fare" button se khud finish karega.
     } catch (e: any) {
       Alert.alert('Error', getErrorMessage(e, 'Wrong OTP'));
     } finally {
       setUpdating(false);
     }
   };
-
   const onFinishPress = onCompletePress;
 
   const onConfirmCancel = async () => {
@@ -833,7 +831,20 @@ const onPickupPaid = async () => {
 };
 
   const onBack = () => navigation.goBack();
-
+  // Pickup par payment nahi li -> backend ko batao, customer ki screen update hogi
+  const onSwitchToDrop = async () => {
+    if (updating) return;
+    try {
+      setUpdating(true);
+      await api.patch(`/captain-rides/${captainRideId}/pay-at-drop`);
+      setSwitchedToDrop(true);
+      await fetchRide();
+    } catch (e: any) {
+      Alert.alert('Error', getErrorMessage(e, 'Could not switch to pay at drop'));
+    } finally {
+      setUpdating(false);
+    }
+  };
   /* =========================================================
      RENDER
      ========================================================= */
@@ -1090,7 +1101,7 @@ const onPickupPaid = async () => {
     if (payMethod === 'CASH') {
       Alert.alert('Collect cash', `Have you collected ₹${fare} from the customer?`, [
         { text: 'No', style: 'cancel' },
-        { text: 'Pay at drop', onPress: () => setSwitchedToDrop(true) },
+        { text: 'Pay at drop', onPress: onSwitchToDrop },
         { text: 'Yes, received', onPress: onPickupPaid },
       ]);
     } else {

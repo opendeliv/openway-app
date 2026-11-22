@@ -14,6 +14,7 @@ import Ionicons from 'react-native-vector-icons/Ionicons';
 import EditProfileScreen from './src/EditProfileScreen';
 import PrivacyPolicyScreen from './src/features/profile/PrivacyPolicyScreen';
 import ParcelAddressScreen from './src/ParcelAddressScreen';
+import CaptainRequestsScreen from './src//CaptainRequestsScreen';
 
 import LoginScreen from './src/features/auth/screens/LoginScreen';
 import HomeScreen from './src/features/home/screens/HomeScreen';
@@ -93,6 +94,14 @@ function CaptainTabs() {
         component={CaptainHomeScreen}
         options={{ title: 'Home', tabBarIcon: icon('home', 'home-outline') }}
       />
+  <CaptainTab.Screen
+  name="CaptainRequests"
+  component={CaptainRequestsScreen}
+  options={{
+    title: 'Orders',
+    tabBarIcon: icon('receipt', 'receipt-outline'),
+  }}
+/>
       <CaptainTab.Screen
         name="CaptainProfile"
         component={BecomeCaptainScreen}

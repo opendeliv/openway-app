@@ -35,6 +35,7 @@ export type MainTabParamList = {
 
 export type CaptainTabParamList = {
   CaptainHome: undefined;
+   CaptainRequests: undefined; // naya tab
   CaptainProfile: undefined;
 };
 

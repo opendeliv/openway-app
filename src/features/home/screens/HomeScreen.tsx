@@ -52,7 +52,10 @@ const PIN_H = 32; // center pin ki height (stem + dot)
 // ---------- Promo carousel ----------
 const PROMO_W = Dimensions.get('window').width - 32; // scroll ke paddingHorizontal 16+16
 const PROMO_INTERVAL = 3500;
-
+// Bottom illustration
+const ILLUSTRATION_HEIGHT = 320;
+const FADE_HEIGHT = 140;
+const FADE_STEPS = 20;
 const PROMOS = [
   {
     id: 'send',
@@ -270,7 +273,28 @@ const timeAgo = (iso?: string | null) => {
   if (days < 7) return `${days} days ago`;
   return d.toLocaleDateString([], { day: '2-digit', month: 'short' });
 };
+const USER_HOME_IMG = require('../../../constants/userhome.jpeg');
 
+function BottomIllustration() {
+  return (
+    <View pointerEvents="none" style={styles.illusWrap}>
+      <Image source={USER_HOME_IMG} style={styles.illus} resizeMode="cover" />
+
+      <View style={styles.illusFade}>
+        {Array.from({ length: FADE_STEPS }).map((_, i) => (
+          <View
+            key={i}
+            style={{
+              height: FADE_HEIGHT / FADE_STEPS,
+              backgroundColor: BG,
+              opacity: 1 - i / (FADE_STEPS - 1),
+            }}
+          />
+        ))}
+      </View>
+    </View>
+  );
+}
 export default function HomeScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const hideTabBar = useHideTabBarOnScroll();
@@ -981,9 +1005,14 @@ const onServicePress = (id: string) => {
                       </TouchableOpacity>
                     );
                   })}
-                </View>
+                          </View>
               </>
             )}
+
+            {/* Illustration: content ke saath scroll hoti hai */}
+            <View style={styles.inlineIllus}>
+              <BottomIllustration />
+            </View>
           </ScrollView>
         </Animated.View>
       </View>
@@ -1002,11 +1031,19 @@ const onServicePress = (id: string) => {
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   container: { flex: 1, backgroundColor: BG },
-  scroll: { paddingHorizontal: 16, paddingBottom: 32 },
+  scroll: { paddingHorizontal: 16, paddingBottom: 0 },
 
   // map
   mapWrap: { position: 'absolute', left: 0, right: 0, top: 0 },
-
+  // bottom illustration
+  inlineIllus: { marginHorizontal: -16, marginTop: 16 },
+  illusWrap: {
+    height: ILLUSTRATION_HEIGHT,
+    overflow: 'hidden',
+    backgroundColor: BG,
+  },
+  illus: { width: '100%', height: '100%', opacity: 0.9 },
+  illusFade: { position: 'absolute', top: 0, left: 0, right: 0 },
   // fixed center pin (dot ka center = map ka exact center)
   centerPin: {
     position: 'absolute',

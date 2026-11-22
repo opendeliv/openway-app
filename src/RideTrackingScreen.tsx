@@ -32,8 +32,6 @@ const RED = '#DC2626';
 const GREEN = '#16A34A';
 const GREEN_LIGHT = '#DCFCE7';
 const STAR = '#F59E0B';
-const VIOLET = '#7C3AED';
-const VIOLET_LIGHT = '#EDE9FE';
 
 const POLL_MS = 4000;
 
@@ -235,7 +233,6 @@ class SheetBoundary extends React.Component<
    SMALL PIECES
    ========================================================= */
 
-
 // One "label : value" line
 const InfoRow = ({ label, value }: { label: string; value: string }) => (
   <View style={styles.infoRow}>
@@ -351,16 +348,15 @@ const PayNowCard = ({ ride }: { ride: RideData }) => {
   }
 
   return (
-    <View style={[styles.card, styles.payNowCard, done && styles.payNowCardDone]}>
-      <Text style={styles.cardEyebrow}>PAYMENT</Text>
-      <View style={styles.captainRow}>
-        <View style={[styles.avatar, styles.avatarFallback, done && styles.avatarDone]}>
-          <Ionicons name={icon} size={22} color={done ? GREEN : BLUE} />
-        </View>
-        <View style={styles.flex}>
-          <Text style={[styles.captainName, done && { color: GREEN }]}>{title}</Text>
-          <Text style={styles.captainSub}>{sub}</Text>
-        </View>
+    <View style={[styles.payCard, done && styles.payCardDone]}>
+      <View style={[styles.payIcon, done && styles.payIconDone]}>
+        <Ionicons name={icon} size={18} color={done ? GREEN : BLUE} />
+      </View>
+      <View style={styles.flex}>
+        <Text style={[styles.payTitle, done && { color: GREEN }]}>{title}</Text>
+        <Text style={styles.paySub} numberOfLines={2}>
+          {sub}
+        </Text>
       </View>
     </View>
   );
@@ -370,22 +366,29 @@ const PayNowCard = ({ ride }: { ride: RideData }) => {
 const OnTheWayBanner = ({ eta, name }: { eta: number | null | undefined; name: string }) => {
   const pulse = useRef(new Animated.Value(0)).current;
 
-  useEffect(() => {
-    const loop = Animated.loop(
+ useEffect(() => {
+  const loop = Animated.loop(
+    Animated.sequence([
       Animated.timing(pulse, {
         toValue: 1,
-        duration: 1300,
+        duration: 2200,
         easing: Easing.out(Easing.ease),
         useNativeDriver: true,
       }),
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [pulse]);
-
+      Animated.delay(100),
+      Animated.timing(pulse, {
+        toValue: 0,
+        duration: 0,
+        useNativeDriver: true,
+      }),
+    ]),
+  );
+  loop.start();
+  return () => loop.stop();
+}, [pulse]);
   const ring = {
     transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 2.4] }) }],
-    opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }),
+opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0] }),
   };
 
   return (
@@ -404,6 +407,50 @@ const OnTheWayBanner = ({ eta, name }: { eta: number | null | undefined; name: s
         <Text style={styles.onWayEtaValue}>{eta != null ? eta : '--'}</Text>
         <Text style={styles.onWayEtaUnit}>min</Text>
       </View>
+    </View>
+  );
+};
+
+// Trip in progress: highlighted banner with pulsing dot
+const InProgressBanner = ({ duration }: { duration: number | null | undefined }) => {
+  const pulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.timing(pulse, {
+        toValue: 1,
+        duration: 2600,
+        easing: Easing.out(Easing.ease),
+        useNativeDriver: true,
+      }),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+
+  const ring = {
+    transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 2.4] }) }],
+    opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.6, 0] }),
+  };
+
+  return (
+    <View style={styles.progBanner}>
+      <View style={styles.onWayDotWrap}>
+        <Animated.View style={[styles.onWayRing, ring]} />
+        <View style={styles.onWayDot} />
+      </View>
+      <View style={styles.flex}>
+        <Text style={styles.onWayTitle}>Delivery in progress</Text>
+        <Text style={styles.onWaySub} numberOfLines={1}>
+          Captain is heading to the drop location
+        </Text>
+      </View>
+      {duration != null && (
+        <View style={styles.onWayEta}>
+          <Text style={[styles.onWayEtaValue, { color: GREEN }]}>{duration}</Text>
+          <Text style={styles.onWayEtaUnit}>min</Text>
+        </View>
+      )}
     </View>
   );
 };
@@ -448,7 +495,10 @@ const PickupSteps = ({
   const paidAtPickup = !!ride.pickupPaymentDone || toStage(ride.paymentStage) === 'PICKUP';
   // Captain ne payment le li => product bhi ja chuka hai
   const productDone = !parcelLike || productGiven || paidAtPickup;
-const otpReady = productDone;
+
+  // OTP ko payment se gate mat karo, warna captain "Pay at drop" chune to
+  // customer ko OTP kabhi dikhega hi nahi
+  const otpReady = productDone;
 
   const otpDigits = (str(ride.otp) || '----').split('');
 
@@ -463,20 +513,20 @@ const otpReady = productDone;
     });
   }
 
-steps.push({
-  key: 'pay',
-  title: !payAtPickup
-    ? 'Payment at drop'
-    : paidAtPickup
-    ? 'Pickup payment received'
-    : 'Pay your pickup payment',
-  sub: !payAtPickup
-    ? `You will pay ${fare} at the drop location`
-    : paidAtPickup
-    ? `Captain confirmed ${fare} (${method}) received`
-    : undefined,
-  state: !payAtPickup ? 'later' : paidAtPickup ? 'done' : productDone ? 'current' : 'locked',
-});
+  steps.push({
+    key: 'pay',
+    title: !payAtPickup
+      ? 'Payment at drop'
+      : paidAtPickup
+      ? 'Pickup payment received'
+      : 'Pay your pickup payment',
+    sub: !payAtPickup
+      ? `You will pay ${fare} at the drop location`
+      : paidAtPickup
+      ? `Captain confirmed ${fare} (${method}) received`
+      : undefined,
+    state: !payAtPickup ? 'later' : paidAtPickup ? 'done' : productDone ? 'current' : 'locked',
+  });
 
   steps.push({
     key: 'otp',
@@ -552,39 +602,29 @@ steps.push({
     </View>
   );
 };
-// STARTED: receiver OTP. Violet theme so it looks different from the pickup OTP
+
+// STARTED: receiver OTP (compact, minimal)
 const ReceiverOtpPanel = ({ ride }: { ride: RideData }) => {
   const digits = (str(ride.deliveryOtp) || '----').split('');
-  const name = str(ride.receiverName);
-  const phone = str(ride.receiverPhone);
+  const name = str(ride.receiverName) || 'Receiver';
 
   return (
-    <View style={styles.rcvPanel}>
-      <View style={styles.rcvBadge}>
-        <Ionicons name="person" size={12} color="#fff" />
-        <Text style={styles.rcvBadgeText}>RECEIVER OTP</Text>
-      </View>
+    <View style={styles.rcvCard}>
+      <View style={styles.rcvTop}>
+        <View style={styles.flex}>
+          <Text style={styles.rcvTitle}>Delivery OTP</Text>
+          <Text style={styles.rcvSub} numberOfLines={1}>
+            {name} will ask for this at drop
+          </Text>
+        </View>
 
-      <Text style={styles.rcvTitle}>Ye OTP receiver ko batao</Text>
-      <Text style={styles.rcvWho}>
-        {name ? name : 'Receiver'}
-        {phone ? `  •  ${phone}` : ''}
-      </Text>
-
-      <View style={styles.rcvDigitsRow}>
-        {digits.map((d, i) => (
-          <View key={i} style={styles.rcvDigitBox}>
-            <Text style={styles.rcvDigit}>{d}</Text>
-          </View>
-        ))}
-      </View>
-
-      <View style={styles.rcvNote}>
-        <Ionicons name="shield-checkmark-outline" size={15} color="#5B21B6" />
-        <Text style={styles.rcvNoteText}>
-          Ye OTP tabhi do jab receiver ko product mil jaye. Captain delivery par receiver se ye OTP
-          maangega.
-        </Text>
+        <View style={styles.rcvDigitsRow}>
+          {digits.map((d, i) => (
+            <View key={i} style={styles.rcvDigitBox}>
+              <Text style={styles.rcvDigit}>{d}</Text>
+            </View>
+          ))}
+        </View>
       </View>
     </View>
   );
@@ -1282,7 +1322,7 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
   // ARRIVED    -> Captain has arrived (product -> payment -> OTP)
   // STARTED    -> Delivery in progress (receiver OTP)
   const headline = started
-    ? 'Delivery in progress'
+    ? 'On the way to drop'
     : arrived
     ? 'Captain has arrived'
     : onTheWay
@@ -1400,16 +1440,19 @@ export default function RideTrackingScreen({ rideId, onClose }: Props) {
                 />
               )}
 
-              {/* Captain arrived: give product -> pickup payment -> OTP */}
-          {arrived && (
-  <PickupSteps
-    ride={ride}
-    productGiven={productGiven}
-    onProductGiven={() => setProductGiven(true)}
-  />
-)}
+              {/* Trip in progress: highlighted */}
+              {started && <InProgressBanner duration={ride.duration} />}
 
-              {/* Trip started: receiver OTP (different look from the pickup OTP) */}
+              {/* Captain arrived: give product -> pickup payment -> OTP */}
+              {arrived && (
+                <PickupSteps
+                  ride={ride}
+                  productGiven={productGiven}
+                  onProductGiven={() => setProductGiven(true)}
+                />
+              )}
+
+              {/* Trip started: delivery OTP */}
               {started && !!str(ride.deliveryOtp) && <ReceiverOtpPanel ride={ride} />}
 
               {/* PickupSteps already shows the payment status while ARRIVED */}
@@ -1431,31 +1474,9 @@ const styles = StyleSheet.create({
   body: { flex: 1 },
   scroll: { padding: 16, paddingBottom: 24 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  fullWidth: { alignSelf: 'stretch', marginTop: 28 },
-  gap: { height: 10 },
 
   bigTitle: { fontSize: 20, fontWeight: '800', color: BLACK, textAlign: 'center', marginTop: 18 },
   bigSub: { fontSize: 13.5, color: GREY, textAlign: 'center', marginTop: 6, lineHeight: 19 },
-
-  // searching pulse
-  pulseWrap: { width: 140, height: 140, alignItems: 'center', justifyContent: 'center' },
-  pulseRing: {
-    position: 'absolute',
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: BLUE,
-  },
-  pulseCore: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: BLUE_LIGHT,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: BLUE,
-  },
 
   card: { backgroundColor: '#fff', borderRadius: 16, padding: 14, marginBottom: 12 },
   cardTitle: { fontSize: 15, fontWeight: '800', color: BLACK, marginBottom: 10 },
@@ -1468,10 +1489,31 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
 
-  // payment card (active order)
-  payNowCard: { borderWidth: 1.5, borderColor: BLUE_LIGHT },
-  payNowCardDone: { borderColor: GREEN, backgroundColor: '#F0FDF4' },
-  avatarDone: { backgroundColor: GREEN_LIGHT },
+  // payment card (compact, minimal)
+  payCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+  payCardDone: { borderColor: GREEN_LIGHT },
+  payIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: BLUE_LIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  payIconDone: { backgroundColor: GREEN_LIGHT },
+  payTitle: { fontSize: 14.5, fontWeight: '800', color: BLACK },
+  paySub: { fontSize: 12, color: GREY, marginTop: 2, lineHeight: 17 },
 
   // paid-at badge + info rows
   stageBadge: {
@@ -1568,15 +1610,6 @@ const styles = StyleSheet.create({
   },
   tripLabel: { fontSize: 12, color: GREY },
   tripValue: { fontSize: 14.5, fontWeight: '600', color: BLACK, marginTop: 2 },
-  statsRow: {
-    flexDirection: 'row',
-    borderTopWidth: 1,
-    borderTopColor: BORDER,
-    paddingTop: 10,
-    marginTop: 2,
-  },
-  stat: { flex: 1 },
-  statValue: { fontSize: 15, fontWeight: '700', color: BLACK, marginTop: 2 },
 
   // trip details: dropdown header, body, vehicle row, 3-dot menu
   cardHeadRow: {
@@ -1674,7 +1707,6 @@ const styles = StyleSheet.create({
   menuCloseText: { fontSize: 15, fontWeight: '700', color: BLACK },
 
   // completed
-  successWrap: { alignItems: 'center', marginVertical: 16 },
   successCard: {
     alignItems: 'center',
     backgroundColor: '#fff',
@@ -1707,7 +1739,6 @@ const styles = StyleSheet.create({
   skipBtn: { paddingVertical: 12, alignItems: 'center', marginTop: 4 },
   skipText: { color: GREY, fontSize: 14, fontWeight: '700' },
   bigCircle: { width: 84, height: 84, borderRadius: 42, alignItems: 'center', justifyContent: 'center' },
-  fareBig: { fontSize: 32, fontWeight: '800', color: BLACK, marginTop: 4 },
 
   // rating
   starRow: { flexDirection: 'row', justifyContent: 'center', marginBottom: 14 },
@@ -1766,8 +1797,16 @@ const styles = StyleSheet.create({
   etaPillTextGreen: { color: GREEN },
   etaPillTextWhite: { color: '#fff' },
 
-  // captain on the way banner
+  // banners (on the way = blue, in progress = green)
   onWayBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: BLUE,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 12,
+  },
+  progBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: BLUE,
@@ -1826,63 +1865,33 @@ const styles = StyleSheet.create({
   payBoxAmount: { fontSize: 28, fontWeight: '800', color: BLACK, marginTop: 2 },
   waitRow: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
   waitText: { flex: 1, marginLeft: 10, fontSize: 12, color: GREY, lineHeight: 17 },
-  linkText: { fontSize: 12, fontWeight: '700', color: BLUE, marginTop: 10, textAlign: 'center' },
 
-  // receiver OTP (violet, clearly different from the pickup OTP)
-  rcvPanel: {
-    backgroundColor: '#F5F3FF',
-    borderRadius: 16,
-    borderWidth: 2,
-    borderColor: VIOLET,
-    padding: 14,
-    marginBottom: 12,
-  },
-  rcvBadge: {
-    alignSelf: 'flex-start',
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: VIOLET,
-    borderRadius: 999,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-  },
-  rcvBadgeText: { color: '#fff', fontSize: 11, fontWeight: '800', letterSpacing: 0.6, marginLeft: 5 },
-  rcvTitle: { fontSize: 15, fontWeight: '800', color: BLACK, marginTop: 10 },
-  rcvWho: { fontSize: 12.5, color: GREY, marginTop: 2 },
-  rcvDigitsRow: { flexDirection: 'row', justifyContent: 'center', marginVertical: 12 },
-  rcvDigitBox: {
-    width: 48,
-    height: 56,
-    borderRadius: 12,
-    backgroundColor: '#fff',
-    borderWidth: 2,
-    borderColor: VIOLET,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginHorizontal: 5,
-  },
-  rcvDigit: { fontSize: 28, fontWeight: '800', color: VIOLET },
-  rcvNote: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: VIOLET_LIGHT,
-    borderRadius: 10,
-    padding: 8,
-  },
-  rcvNoteText: { flex: 1, marginLeft: 6, fontSize: 11.5, fontWeight: '600', color: '#5B21B6' },
-
-  // OTP (extra compact)
-  otpPanel: {
+  // delivery OTP (compact, minimal)
+  rcvCard: {
     backgroundColor: '#fff',
     borderRadius: 14,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginBottom: 10,
-    borderWidth: 1.5,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 12,
+    borderWidth: 1,
     borderColor: BORDER,
   },
-  otpPanelGreen: { borderColor: GREEN, backgroundColor: '#F0FDF4' },
-  otpHead: { alignItems: 'center' },
+  rcvTop: { flexDirection: 'row', alignItems: 'center' },
+  rcvTitle: { fontSize: 14.5, fontWeight: '800', color: BLACK },
+  rcvSub: { fontSize: 12, color: GREY, marginTop: 2 },
+  rcvDigitsRow: { flexDirection: 'row', marginLeft: 10 },
+  rcvDigitBox: {
+    width: 34,
+    height: 40,
+    borderRadius: 9,
+    backgroundColor: BLUE_LIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 5,
+  },
+  rcvDigit: { fontSize: 20, fontWeight: '800', color: BLUE },
+
+  // pickup OTP (inside pickup steps)
   otpPanelTitle: { fontSize: 12.5, fontWeight: '700', color: BLACK, textAlign: 'center' },
   otpDigitsRow: { flexDirection: 'row', justifyContent: 'center', marginVertical: 6 },
   otpDigitBox: {
@@ -1897,7 +1906,7 @@ const styles = StyleSheet.create({
   otpDigit: { fontSize: 20, fontWeight: '800', color: BLUE },
   otpPanelHint: { fontSize: 11, color: GREY, textAlign: 'center' },
 
-  // OTP safety note (photo / video before handing over the product)
+  // safety note (photo / video before handing over the product)
   otpNote: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1929,14 +1938,5 @@ const styles = StyleSheet.create({
   },
   btnTop: { marginTop: 20, alignSelf: 'stretch' },
   btnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  btnOutline: {
-    height: 52,
-    borderRadius: 14,
-    borderWidth: 1.5,
-    borderColor: RED,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnOutlineText: { color: RED, fontSize: 16, fontWeight: '700' },
   btnDisabled: { opacity: 0.6 },
 });

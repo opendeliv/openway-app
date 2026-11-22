@@ -145,7 +145,7 @@ export default function RideSummaryModal({
   const ride = data?.ride ?? {};
   const fare = Number(ride.fare ?? data?.earning ?? 0).toFixed(0);
 
-  const paid = !!ride.paidAt;
+  const paid = !!ride.paymentMethod;
   const paidMethod: PayMethod | null = ride.paymentMethod ?? null;
   const rated = ratedLocal || ride.userRating != null;
 
