@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Modal,
   Text,
   TouchableOpacity,
   StyleSheet,
@@ -186,16 +187,6 @@ const formatDocNumber = (type: string, value: string | null | undefined) => {
   return value;
 };
 
-const getDocBadge = (status: DocStatus) => {
-  if (status === 'APPROVED') {
-    return { label: 'Verified', color: GREEN, bg: GREEN_LIGHT };
-  }
-  if (status === 'REJECTED') {
-    return { label: 'Rejected', color: RED, bg: RED_LIGHT };
-  }
-  return { label: 'In review', color: ORANGE, bg: ORANGE_LIGHT };
-};
-
 const formatDate = (date: string | null | undefined) => {
   if (!date) return '-';
 
@@ -220,16 +211,22 @@ const getErrorMessage = (e: any, fallback: string) => {
   return Array.isArray(msg) ? msg.join('\n') : msg || e?.message || fallback;
 };
 
-const getVerificationBadge = (status: string | undefined) => {
-  if (status === 'PENDING') {
-    return { label: 'Pending', color: ORANGE, bg: ORANGE_LIGHT };
-  }
-
+// Top badge admin ke decision se chalta hai
+const getVerificationBadge = (
+  status: string | undefined,
+  isVerified?: boolean,
+) => {
   if (status === 'REJECTED') {
     return { label: 'Rejected', color: RED, bg: RED_LIGHT };
   }
-
-  return { label: 'Verified', color: GREEN, bg: GREEN_LIGHT };
+  if (status === 'PENDING') {
+    return { label: 'Pending', color: ORANGE, bg: ORANGE_LIGHT };
+  }
+  // APPROVED: verified ya unverified, admin ke hisaab se
+  if (status === 'APPROVED' && isVerified) {
+    return { label: 'Verified', color: GREEN, bg: GREEN_LIGHT };
+  }
+  return { label: 'Unverified', color: ORANGE, bg: ORANGE_LIGHT };
 };
 
 // "Amit Sharma" -> "AS"
@@ -290,6 +287,9 @@ export default function BecomeCaptainScreen() {
 
   // Which menu option is open (My Rides / Preferences / Documents / Settings)
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+
+  // Admin ka reason dikhane wala popup
+  const [reasonOpen, setReasonOpen] = useState(false);
 
   // Show the full-screen loader only the first time
   const hasLoadedOnce = useRef(false);
@@ -407,7 +407,13 @@ export default function BecomeCaptainScreen() {
     );
   }
 
-  const badge = getVerificationBadge(captain?.verificationStatus);
+  // Admin ke decision ke hisaab se badge
+  const badge = getVerificationBadge(
+    captain?.verificationStatus,
+    (captain as any)?.isVerified,
+  );
+  const canSeeReason = badge.label === 'Unverified' || badge.label === 'Rejected';
+  const adminReason: string | null = (captain as any)?.rejectionReason ?? null;
   const name = captain?.name || 'Captain';
   const initials = initialsOf(name) || 'C';
 
@@ -429,11 +435,6 @@ export default function BecomeCaptainScreen() {
   const missing = docsInfo?.missing ?? [];
   const requiredCount = (docsInfo?.required ?? []).length;
   const requiredUploaded = requiredCount - missing.length;
-  const hasPending = documents.some((d) => d.status === 'PENDING');
-  const hasRejected = documents.some((d) => d.status === 'REJECTED');
-
-  // When the profile is verified, hide pending / missing / notes in documents
-  const isVerified = badge.label === 'Verified';
 
   const personalRows = [
     { id: 'email', icon: 'mail-outline', label: 'Email', value: captain?.email || 'Not added' },
@@ -545,7 +546,7 @@ export default function BecomeCaptainScreen() {
     );
   };
 
-  // Documents: vehicle number, model, color + uploaded documents
+  // Documents: vehicle number, model, color + uploaded documents (badges nahi)
   const renderDocumentsContent = () => (
     <View style={styles.expandBox}>
       {!!vehicleKey && !onFoot && (
@@ -573,7 +574,7 @@ export default function BecomeCaptainScreen() {
 
       <View style={[styles.sectionHead, !!vehicleKey && !onFoot && styles.sectionGap]}>
         <Text style={styles.subTitle}>Documents</Text>
-        {!!docsInfo && !isVerified && (
+        {!!docsInfo && (
           <View style={styles.countPill}>
             <Text style={styles.countPillText}>
               {requiredUploaded}/{requiredCount} uploaded
@@ -586,33 +587,8 @@ export default function BecomeCaptainScreen() {
         <Text style={styles.emptyText}>Could not load documents</Text>
       ) : (
         <>
-          {isVerified ? null : missing.length > 0 ? (
-            <View style={[styles.noteBox, { backgroundColor: ORANGE_LIGHT }]}>
-              <Ionicons name="alert-circle" size={18} color={ORANGE} style={styles.noteIcon} />
-              <Text style={[styles.noteText, { color: ORANGE }]}>
-                Some required documents are missing. You will not be verified
-                until all of them are uploaded.
-              </Text>
-            </View>
-          ) : hasRejected ? (
-            <View style={[styles.noteBox, { backgroundColor: RED_LIGHT }]}>
-              <Ionicons name="close-circle" size={18} color={RED} style={styles.noteIcon} />
-              <Text style={[styles.noteText, { color: RED }]}>
-                Some documents were rejected. Please upload them again.
-              </Text>
-            </View>
-          ) : hasPending ? (
-            <View style={[styles.noteBox, { backgroundColor: BLUE_LIGHT }]}>
-              <Ionicons name="time" size={18} color={BLUE} style={styles.noteIcon} />
-              <Text style={[styles.noteText, { color: BLUE }]}>
-                Your documents are being verified.
-              </Text>
-            </View>
-          ) : null}
-
           {documents.map((d, i) => {
             const meta = docLabel(d.type);
-            const docBadge = getDocBadge(isVerified ? 'APPROVED' : d.status);
             const number = formatDocNumber(d.type, d.documentNumber);
             const isLast = i === documents.length - 1 && missing.length === 0;
 
@@ -633,16 +609,6 @@ export default function BecomeCaptainScreen() {
                   </Text>
 
                   {!!number && <Text style={styles.docNumber}>{number}</Text>}
-
-                  {!isVerified && d.status === 'REJECTED' && !!d.rejectionReason && (
-                    <Text style={styles.docReason}>Reason: {d.rejectionReason}</Text>
-                  )}
-                </View>
-
-                <View style={[styles.badge, { backgroundColor: docBadge.bg }]}>
-                  <Text style={[styles.badgeText, { color: docBadge.color }]}>
-                    {docBadge.label}
-                  </Text>
                 </View>
               </View>
             );
@@ -662,25 +628,7 @@ export default function BecomeCaptainScreen() {
 
                 <View style={styles.flex}>
                   <Text style={styles.docTitle}>{meta.label}</Text>
-                  {!isVerified && (
-                    <Text style={styles.docNumber}>Not uploaded yet</Text>
-                  )}
-                </View>
-
-                <View
-                  style={[
-                    styles.badge,
-                    { backgroundColor: isVerified ? GREEN_LIGHT : RED_LIGHT },
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.badgeText,
-                      { color: isVerified ? GREEN : RED },
-                    ]}
-                  >
-                    {isVerified ? 'Verified' : 'Missing'}
-                  </Text>
+                  <Text style={styles.docNumber}>Not uploaded yet</Text>
                 </View>
               </View>
             );
@@ -754,11 +702,24 @@ export default function BecomeCaptainScreen() {
               </View>
 
               <View style={styles.badgeRow}>
-                <View style={[styles.badge, { backgroundColor: badge.bg }]}>
+                <TouchableOpacity
+                  style={[styles.badge, { backgroundColor: badge.bg }]}
+                  disabled={!canSeeReason}
+                  activeOpacity={0.8}
+                  onPress={() => setReasonOpen(true)}
+                >
                   <Text style={[styles.badgeText, { color: badge.color }]}>
                     {badge.label}
                   </Text>
-                </View>
+                  {canSeeReason && (
+                    <Ionicons
+                      name="chevron-forward"
+                      size={12}
+                      color={badge.color}
+                      style={{ marginLeft: 2 }}
+                    />
+                  )}
+                </TouchableOpacity>
 
                 <View
                   style={[
@@ -902,6 +863,50 @@ export default function BecomeCaptainScreen() {
           </View>
         </View>
       </ScrollView>
+
+      {/* Admin ka reason popup */}
+      <Modal
+        visible={reasonOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setReasonOpen(false)}
+      >
+        <TouchableOpacity
+          style={styles.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setReasonOpen(false)}
+        >
+          <TouchableOpacity activeOpacity={1} style={styles.modalCard}>
+            <View style={[styles.modalIcon, { backgroundColor: badge.bg }]}>
+              <Ionicons
+                name={badge.label === 'Rejected' ? 'close-circle' : 'alert-circle'}
+                size={26}
+                color={badge.color}
+              />
+            </View>
+
+            <Text style={styles.modalTitle}>
+              {badge.label === 'Rejected' ? 'Profile rejected' : 'Profile unverified'}
+            </Text>
+
+            <Text style={styles.modalLabel}>Admin ka message</Text>
+            <Text style={styles.modalReason}>
+              {adminReason ||
+                (badge.label === 'Rejected'
+                  ? 'Admin ne koi wajah nahi likhi.'
+                  : 'Admin abhi aapki details check kar raha hai. Verify hone par badge badal jayega.')}
+            </Text>
+
+            <TouchableOpacity
+              style={styles.modalBtn}
+              activeOpacity={0.9}
+              onPress={() => setReasonOpen(false)}
+            >
+              <Text style={styles.modalBtnText}>Samajh gaya</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1118,16 +1123,6 @@ const styles = StyleSheet.create({
   countPillText: { fontSize: 11, fontWeight: '800', color: BLUE },
 
   // documents
-  noteBox: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    borderRadius: 12,
-    padding: 10,
-    marginTop: 4,
-    marginBottom: 6,
-  },
-  noteIcon: { marginRight: 8, marginTop: 1 },
-  noteText: { flex: 1, fontSize: 12, lineHeight: 17, fontWeight: '600' },
   docRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1150,7 +1145,6 @@ const styles = StyleSheet.create({
   docThumbEmoji: { fontSize: 20 },
   docTitle: { fontSize: 14, fontWeight: '700', color: BLACK },
   docNumber: { fontSize: 12, color: GREY, marginTop: 2 },
-  docReason: { fontSize: 12, color: RED, marginTop: 2 },
   emptyText: { fontSize: 13, color: GREY, paddingVertical: 14 },
 
   // ride preferences
@@ -1209,4 +1203,57 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   settingLabel: { flex: 1, fontSize: 14, fontWeight: '700', color: BLACK },
+
+  // admin reason modal
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    width: '100%',
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 20,
+    alignItems: 'center',
+  },
+  modalIcon: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
+  },
+  modalTitle: { fontSize: 17, fontWeight: '800', color: BLACK },
+  modalLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: GREY,
+    marginTop: 14,
+    alignSelf: 'flex-start',
+  },
+  modalReason: {
+    fontSize: 14,
+    color: BLACK,
+    lineHeight: 20,
+    marginTop: 4,
+    alignSelf: 'flex-start',
+    backgroundColor: BG,
+    borderRadius: 12,
+    padding: 12,
+    width: '100%',
+  },
+  modalBtn: {
+    height: 46,
+    borderRadius: 14,
+    backgroundColor: BLUE,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
+    alignSelf: 'stretch',
+  },
+  modalBtnText: { color: '#fff', fontSize: 14, fontWeight: '800' },
 });
